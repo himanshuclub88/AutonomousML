@@ -17,9 +17,10 @@ from typing import Any
 
 import pandas as pd
 import requests
-from ..config import COLLAB_RUNTIME
+
 
 COLAB_API = "https://colaboratory.googleapis.com/v1beta"
+DEFAULT_RUNTIME = "runtimes/r-6f49ecb3-e213-4796-b4d1-6923be00f80e"
 
 
 class ColabAccessRequired(RuntimeError):
@@ -51,19 +52,28 @@ def _google_credentials():
 
 
 def _get_runtime_connection() -> tuple[str, str]:
+    """Fetch fresh connection details for an existing Colab runtime."""
     credentials = _google_credentials()
     project = os.getenv("GOOGLE_CLOUD_PROJECT", "537909573529").strip()
-    runtime_name = COLLAB_RUNTIME
+    runtime_name = os.getenv("COLAB_RUNTIME_NAME", DEFAULT_RUNTIME).strip().strip("/")
     if not runtime_name:
-        raise ColabAccessRequired("Set COLAB_RUNTIME_NAME to an existing Colab runtime resource name.")
-    if not runtime_name.startswith("runtimes/") and "/runtimes/" not in runtime_name:
         raise ColabAccessRequired(
-            "COLAB_RUNTIME_NAME must look like 'runtimes/r-…' or a full Colab runtime resource name."
+            "Set COLAB_RUNTIME_NAME to an existing Colab runtime resource name."
         )
-    if runtime_name.startswith("projects/"):
-        url = f"{COLAB_API}/{runtime_name}"
-    else:
-        url = f"{COLAB_API}/{runtime_name}"
+
+    # Always build an absolute URL. requests.get('/runtimes/...') is invalid.
+    api_root = "https://colaboratory.googleapis.com/v1beta"
+    runtime_path = runtime_name
+    if runtime_path.startswith("https://") or runtime_path.startswith("http://"):
+        raise ColabAccessRequired(
+            "COLAB_RUNTIME_NAME must be a runtime resource name, not a URL."
+        )
+    if runtime_path.startswith("projects/"):
+        # A fully-qualified resource name is accepted as-is after the API root.
+        pass
+    elif not runtime_path.startswith("runtimes/"):
+        runtime_path = "runtimes/" + runtime_path
+    url = api_root + "/" + runtime_path.lstrip("/")
 
     headers = {"Authorization": f"Bearer {credentials.token}"}
     if project:
@@ -74,8 +84,9 @@ def _get_runtime_connection() -> tuple[str, str]:
         runtime = response.json()
     except Exception as exc:
         raise ColabAccessRequired(
-            f"Could not retrieve Colab runtime {runtime_name!r}. Confirm it exists and that the Colab API "
-            f"is enabled for project {project!r}. Details: {exc}"
+            f"Could not retrieve Colab runtime {runtime_name!r}. Request URL was "
+            f"{url!r}. Confirm the runtime exists and the Colab API is enabled for "
+            f"project {project!r}. Details: {exc}"
         ) from exc
 
     connection = runtime.get("connectionInfo") or runtime.get("connection_info") or {}
