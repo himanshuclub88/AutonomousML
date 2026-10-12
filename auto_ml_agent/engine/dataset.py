@@ -1,13 +1,11 @@
 
 from __future__ import annotations
-
+from sklearn.model_selection import train_test_split
 from pathlib import Path
 import re
-
 import numpy as np
 import pandas as pd
 from sklearn.datasets import make_classification, make_regression
-
 
 def inspect_csv(path: str) -> tuple[pd.DataFrame, list[str]]:
     """Load a CSV dataset and return its columns."""
@@ -255,3 +253,72 @@ def validate_generated_data(
         raise ValueError(
             "Target must have at least two unique values."
         )
+
+
+def split_data(
+    frame: pd.DataFrame,
+    target: str,
+    problem_type: str,
+):
+    """Split data into training, validation, and test sets."""
+
+    if target not in frame.columns:
+        raise ValueError(
+            f"Target column {target!r} is not in the dataset."
+        )
+
+    clean = frame.dropna(subset=[target]).copy()
+
+    if len(clean) < 30:
+        raise ValueError(
+            "Need at least 30 usable rows for training."
+        )
+
+    X = clean.drop(columns=[target])
+    y = clean[target]
+
+    if X.empty:
+        raise ValueError("No input features remain.")
+
+    stratify = None
+
+    if (
+        problem_type == "classification"
+        and y.nunique() > 1
+        and y.value_counts().min() >= 3
+    ):
+        stratify = y
+
+    X_train, X_temp, y_train, y_temp = train_test_split(
+        X,
+        y,
+        test_size=0.30,
+        random_state=42,
+        stratify=stratify,
+    )
+
+    stratify_temp = None
+
+    if (
+        problem_type == "classification"
+        and y_temp.nunique() > 1
+        and y_temp.value_counts().min() >= 2
+    ):
+        stratify_temp = y_temp
+
+    X_val, X_test, y_val, y_test = train_test_split(
+        X_temp,
+        y_temp,
+        test_size=0.50,
+        random_state=42,
+        stratify=stratify_temp,
+    )
+
+    return (
+        X_train,
+        X_val,
+        X_test,
+        y_train,
+        y_val,
+        y_test,
+    )
