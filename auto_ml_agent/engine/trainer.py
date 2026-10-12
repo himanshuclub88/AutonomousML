@@ -71,11 +71,13 @@ def _is_better(problem_type: str, metric: str, a: float, b: float) -> bool:
 
 def train_candidates(frame: pd.DataFrame, target: str, features: list[str], problem_type: str,
                      candidates: list[str], metric: str, run_dir: Path, workers: int = 3) -> dict:
+    
     run_dir.mkdir(parents=True, exist_ok=True)
     frame = frame[features + [target]].copy()
     X_train, X_val, X_test, y_train, y_val, y_test = _split(frame, target, problem_type)
     results = []
     errors = []
+
     def run_one(name: str):
         started = time.time()
         estimator = _build_estimator(name, problem_type)
@@ -87,6 +89,7 @@ def train_candidates(frame: pd.DataFrame, target: str, features: list[str], prob
         joblib.dump(pipe, artifact)
         return {"model": name, "validation_metric": metric, "validation_score": score,
                 "duration_seconds": round(time.time()-started, 2), "artifact": str(artifact)}
+    
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(candidates)))) as pool:
         futures = {pool.submit(run_one, name): name for name in candidates}
         for future in as_completed(futures):
@@ -109,6 +112,7 @@ def train_candidates(frame: pd.DataFrame, target: str, features: list[str], prob
     test_score = _metric(problem_type, metric, y_test, test_pred)
     final_artifact = run_dir / "best_model.joblib"
     joblib.dump(best_pipe, final_artifact)
+
     output = {
         "problem_type": problem_type, "target_column": target, "features": features,
         "selection_metric": metric, "best_model": best["model"],
@@ -118,6 +122,7 @@ def train_candidates(frame: pd.DataFrame, target: str, features: list[str], prob
         "errors": errors, "best_model_path": str(final_artifact),
         "rows_used": int(len(frame)),
     }
+    
     (run_dir / "metrics.json").write_text(json.dumps(output, indent=2), encoding="utf-8")
     _write_training_script(run_dir / "train_model.py", target, features, problem_type, best["model"], metric)
     return output

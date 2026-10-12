@@ -1,5 +1,6 @@
 
 from __future__ import annotations
+import json
 from sklearn.model_selection import train_test_split
 from pathlib import Path
 import re
@@ -322,3 +323,258 @@ def split_data(
         y_val,
         y_test,
     )
+
+def prepare_dataset(
+    frame: pd.DataFrame,
+    target: str,
+    features: list[str],
+    problem_type: str,
+    *,
+    remove_duplicates: bool = False,
+    min_rows: int = 30,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Validate and prepare tabular data before training.
+
+    Policy:
+    - Drop rows with a missing/invalid target (the target cannot be imputed safely).
+    - Convert +/- infinity in numeric columns to NaN so the trainer's imputers can handle
+      missing feature values using training-fold statistics.
+    - Detect duplicate rows, but preserve them by default.
+    - Do not silently remove constant or all-missing features; report them and fail for
+      all-missing planned features because they cannot provide useful training information.
+    """
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError("frame must be a pandas DataFrame.")
+
+    if not target or target not in frame.columns:
+        raise ValueError(f"Target column {target!r} is not present in the dataset.")
+
+    features = list(dict.fromkeys(features))
+    if target in features:
+        features.remove(target)
+    if not features:
+        raise ValueError("At least one feature column is required.")
+
+    missing_features = [column for column in features if column not in frame.columns]
+    if missing_features:
+        raise ValueError(f"Planned feature columns are missing from the dataset: {missing_features}")
+
+    if problem_type not in {"classification", "regression"}:
+        raise ValueError(f"Unsupported problem type: {problem_type!r}")
+
+    required = features + [target]
+    clean = frame[required].copy()
+    rows_before = int(len(clean))
+
+    missing_before = {
+        str(column): int(count)
+        for column, count in clean.isna().sum().items()
+        if int(count) > 0
+    }
+
+    # Infinite numeric values are invalid data. Treat them as missing so feature
+    # imputers can handle them; invalid target rows are dropped below.
+    numeric_columns = clean.select_dtypes(include=[np.number]).columns.tolist()
+    infinity_counts = {}
+    for column in numeric_columns:
+        mask = np.isinf(clean[column].to_numpy(dtype=float, na_value=np.nan))
+        count = int(mask.sum())
+        if count:
+            infinity_counts[str(column)] = count
+            clean.loc[mask, column] = np.nan
+
+    invalid_target_rows = int(clean[target].isna().sum())
+    clean = clean.dropna(subset=[target]).copy()
+
+    # Regression requires a numeric target. Avoid silently converting arbitrary
+    # strings into numbers or guessing how labels should be interpreted.
+    if problem_type == "regression" and not pd.api.types.is_numeric_dtype(clean[target]):
+        raise ValueError(
+            f"Regression target {target!r} must be numeric; found dtype "
+            f"{clean[target].dtype!s}."
+        )
+
+    if clean[target].nunique(dropna=True) < 2:
+        raise ValueError(
+            f"Target {target!r} has fewer than two unique values after removing "
+            "rows with missing/invalid targets."
+        )
+
+    all_missing_features = [
+        column for column in features if clean[column].isna().all()
+    ]
+    if all_missing_features:
+        raise ValueError(
+            "These planned feature columns contain no usable values: "
+            f"{all_missing_features}. Remove them or provide valid values."
+        )
+
+    duplicate_count = int(clean.duplicated(subset=required).sum())
+    duplicates_removed = 0
+    if remove_duplicates and duplicate_count:
+        before_dedup = len(clean)
+        clean = clean.drop_duplicates(subset=required).copy()
+        duplicates_removed = int(before_dedup - len(clean))
+
+    if len(clean) < min_rows:
+        raise ValueError(
+            f"Only {len(clean)} usable rows remain; at least {min_rows} are required."
+        )
+
+    if problem_type == "classification" and clean[target].nunique() < 2:
+        raise ValueError("Classification requires at least two target classes.")
+
+    # Features that have only one distinct non-null value may be uninformative.
+    constant_features = [
+        column for column in features
+        if clean[column].nunique(dropna=True) <= 1
+    ]
+
+    missing_after = {
+        str(column): int(count)
+        for column, count in clean[required].isna().sum().items()
+        if int(count) > 0
+    }
+
+    report = {
+        "status": "passed",
+        "problem_type": problem_type,
+        "target_column": target,
+        "feature_columns": features,
+        "rows_before": rows_before,
+        "rows_after": int(len(clean)),
+        "rows_dropped_for_missing_target": invalid_target_rows,
+        "duplicate_rows_detected": duplicate_count,
+        "duplicate_rows_removed": duplicates_removed,
+        "remove_duplicates_enabled": remove_duplicates,
+        "missing_values_before": missing_before,
+        "infinite_values_converted_to_missing": infinity_counts,
+        "missing_values_after": missing_after,
+        "constant_features": constant_features,
+        "all_missing_features": all_missing_features,
+        "target_unique_values": int(clean[target].nunique(dropna=True)),
+        "target_class_counts": (
+            {str(k): int(v) for k, v in clean[target].value_counts(dropna=False).items()}
+            if problem_type == "classification"
+            else None
+        ),
+        "notes": [
+            "Missing feature values are left for the training pipeline's imputers.",
+            "Duplicate rows are reported and preserved unless remove_duplicates=True.",
+            "This report describes data checks; it does not prove the dataset is unbiased or leakage-free.",
+        ],
+    }
+
+    return clean, report
+
+
+def write_data_quality_report(report: dict, path: str | Path) -> None:
+    """Save the data quality report as readable JSON."""
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(report, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+def analyze_features(
+    frame: pd.DataFrame,
+    target: str,
+    features: list[str],
+    *,
+    high_cardinality_ratio: float = 0.50,
+    identifier_unique_ratio: float = 0.90,
+) -> dict:
+    """Flag possible feature risks without automatically dropping columns."""
+    if target not in frame.columns:
+        raise ValueError(f"Target column {target!r} is not present in the dataset.")
+
+    missing_features = [column for column in features if column not in frame.columns]
+    if missing_features:
+        raise ValueError(f"Feature columns are missing from the dataset: {missing_features}")
+
+    id_name_pattern = re.compile(
+        r"(^|[\s_\-])(id|uuid|guid|key|index|identifier|record|account|customer_id|"
+        r"transaction_id|row_number)([\s_\-]|$)",
+        flags=re.IGNORECASE,
+    )
+    leakage_name_pattern = re.compile(
+        r"(target|label|outcome|actual|ground.?truth|future|post.?event|"
+        r"final.?price|sale.?price|sold.?price|price.?after)",
+        flags=re.IGNORECASE,
+    )
+
+    feature_reports = []
+    for column in features:
+        series = frame[column]
+        non_null = series.dropna()
+        unique_count = int(non_null.nunique())
+        unique_ratio = float(unique_count / max(1, len(non_null)))
+        name = str(column)
+        flags = []
+        recommendations = []
+
+        if unique_count <= 1:
+            flags.append("constant_feature")
+            recommendations.append("Consider excluding: the feature has no variation.")
+
+        if id_name_pattern.search(name):
+            flags.append("identifier_like_name")
+            recommendations.append(
+                "Review whether this is an identifier rather than a meaningful predictive feature."
+            )
+
+        is_numeric = pd.api.types.is_numeric_dtype(series)
+
+        if (
+            not is_numeric
+            and unique_ratio >= identifier_unique_ratio
+            and len(non_null) >= 20
+        ):
+            flags.append("near_unique_values")
+            recommendations.append(
+                "Review for unique identifiers or categorical values "
+                "that may not generalize."
+            )
+
+        is_categorical = (
+            pd.api.types.is_object_dtype(series)
+            or pd.api.types.is_string_dtype(series)
+            or isinstance(series.dtype, pd.CategoricalDtype)
+        )
+        if is_categorical and unique_count > 20 and unique_ratio >= high_cardinality_ratio:
+            flags.append("high_cardinality_categorical")
+            recommendations.append(
+                "Review encoding cost and generalization; consider domain-specific encoding or feature engineering."
+            )
+
+        if leakage_name_pattern.search(name):
+            flags.append("possible_target_leakage_by_name")
+            recommendations.append(
+                "Check whether this column is derived from the target or only available after the prediction point."
+            )
+
+        feature_reports.append({
+            "column": name,
+            "dtype": str(series.dtype),
+            "rows": int(len(series)),
+            "missing_values": int(series.isna().sum()),
+            "unique_values": unique_count,
+            "unique_ratio": round(unique_ratio, 4),
+            "flags": flags,
+            "recommendations": recommendations,
+        })
+
+    flagged = [item for item in feature_reports if item["flags"]]
+    return {
+        "target_column": target,
+        "feature_count": len(features),
+        "features_flagged": len(flagged),
+        "feature_analysis": feature_reports,
+        "important_limitations": [
+            "These are heuristic warnings, not proof that a feature is harmful or leaks the target.",
+            "Columns are not automatically removed; review recommendations before changing the training features.",
+            "Address/location features can be predictive, but raw high-cardinality addresses may overfit or increase encoding cost.",
+        ],
+    }

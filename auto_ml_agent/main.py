@@ -10,7 +10,15 @@ import pandas as pd
 from .agent import create_plan
 from .backends.colab import run_colab_job
 from .backends.local import run_local_job
-from .engine.dataset import generate_synthetic, inspect_csv, validate_generated_data
+from .engine.dataset import (
+    generate_synthetic,
+    inspect_csv,
+    validate_generated_data,
+    prepare_dataset,
+    write_data_quality_report,
+    analyze_features,
+)
+
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNS_DIR = ROOT / "workspace" / "runs"
@@ -105,7 +113,41 @@ def main() -> None:
             frame = frame[selected].copy()
             frame.to_csv(run_dir / "input_dataset_copy.csv", index=False)
 
-        workers = min(3, len(plan.candidate_models))
+        
+        frame, quality_report = prepare_dataset(
+            frame=frame,
+            target=plan.target_column,
+            features=plan.feature_columns,
+            problem_type=plan.problem_type,
+            remove_duplicates=False,
+        )
+
+        feature_report = analyze_features(
+            frame=frame,
+            target=plan.target_column,
+            features=plan.feature_columns,
+        )
+
+        quality_report["feature_analysis"] = feature_report
+
+        write_data_quality_report(
+            quality_report,
+            run_dir / "data_quality_report.json",
+        )
+
+        n=1
+        import time
+        while(n<11):
+            s = n*5*"#"+(10-n)*5*" "
+            time.sleep(1)
+            print(f"|{s}|", end="\r", flush=True)
+            n+=1
+
+        print("\n--- Data quality report ---")
+        print(json.dumps(quality_report, indent=2))
+
+
+        workers = min(4, len(plan.candidate_models))
         print(f"\nTraining {len(plan.candidate_models)} candidate model(s), up to {workers} concurrently...")
         result = run_local_job(
             frame,
@@ -123,10 +165,20 @@ def main() -> None:
         print("Best model: ", result["best_model_path"])
         print("Metrics:    ", run_dir / "models" / "metrics.json")
         print("Training script:", run_dir / "models" / "train_model.py")
+
     except Exception as exc:
-        (run_dir / "error.txt").write_text(f"{type(exc).__name__}: {exc}", encoding="utf-8")
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "error.txt").write_text(
+                f"{type(exc).__name__}: {exc}",
+                encoding="utf-8",
+            )
+        except OSError as log_error:
+            print(f"Could not save error log: {log_error}")
+
         print(f"\nExperiment failed: {type(exc).__name__}: {exc}")
-        print(f"Error details saved to: {run_dir / 'error.txt'}")
+        print(f"Run directory: {run_dir}")
+
 
 if __name__ == "__main__":
     main()
