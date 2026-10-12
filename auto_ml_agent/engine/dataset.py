@@ -45,9 +45,6 @@ def generate_synthetic(
     if not features:
         raise ValueError("At least one feature is required.")
 
-    if ( problem_type == "regression" and is_house_price_problem(use_case, target, features) ):
-        return generate_house_dataset(target, features, rows, random_state)
-
     # Generic fallback for other ML tasks.
     n_features = max(2, len(features))
 
