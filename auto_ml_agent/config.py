@@ -32,4 +32,4 @@ settings = Settings(
     timezone=_get("TIMEZONE", "Asia/Kolkata"),
 )
 
-COLLAB_RUNTIME = _get('COLLAB_RUNTIME')
+COLLAB_RUNTIME = _get("COLLAB_RUNTIME")

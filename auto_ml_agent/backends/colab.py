@@ -19,8 +19,7 @@ import pandas as pd
 import requests
 from ..config import COLLAB_RUNTIME
 
-COLAB_API = COLLAB_RUNTIME
-DEFAULT_RUNTIME = "runtimes/r-6f49ecb3-e213-4796-b4d1-6923be00f80e"
+COLAB_API = "https://colaboratory.googleapis.com/v1beta"
 
 
 class ColabAccessRequired(RuntimeError):
@@ -54,7 +53,7 @@ def _google_credentials():
 def _get_runtime_connection() -> tuple[str, str]:
     credentials = _google_credentials()
     project = os.getenv("GOOGLE_CLOUD_PROJECT", "537909573529").strip()
-    runtime_name = os.getenv("COLAB_RUNTIME_NAME", DEFAULT_RUNTIME).strip()
+    runtime_name = COLLAB_RUNTIME
     if not runtime_name:
         raise ColabAccessRequired("Set COLAB_RUNTIME_NAME to an existing Colab runtime resource name.")
     if not runtime_name.startswith("runtimes/") and "/runtimes/" not in runtime_name:
