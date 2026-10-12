@@ -160,6 +160,11 @@ def generate_batch(
         "dataset_profile": profile,
     }
 
+    with open("prompt.txt", "w", encoding="utf-8") as f:
+        f.write(f"SYSTEM PROMPT:\n{SYSTEM_PROMPT}\n\n")
+        f.write(f"MESSAGES:\n[{ {'role': 'user', 'content': str(request)} }]\n\n")
+        f.write(f"RESPONSE MODEL:\n{GeneratedRows}")
+
     response = generate_reply(
         system_prompt=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": str(request)}],

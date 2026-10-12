@@ -112,7 +112,7 @@ def main() -> None:
     target = None
     if csv_path:
         try:
-            frame, columns = inspect_csv(csv_path)
+            frame, columns = inspect_csv(csv_path.strip('"')) #"C:\Users\himan\Downloads\housing.csv"
         except Exception as exc:
             print(f"Could not load CSV: {type(exc).__name__}: {exc}")
             return
