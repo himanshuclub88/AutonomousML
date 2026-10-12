@@ -127,8 +127,27 @@ def main() -> None:
         answer = input("Generate additional data? [y/N]: ").strip().lower()
 
         if answer in {"y", "yes"}:
-            additional_rows = int(input("How many additional rows? "))
-            frame = augment_dataset(frame, additional_rows)
+            while True:
+                try:
+                    additional_rows = int(input("How many additional rows? ").strip())
+                    if additional_rows <= 0:
+                        print("Enter a number greater than zero.")
+                        continue
+                    break
+                except ValueError:
+                    print("Enter a valid whole number.")
+
+            frame = augment_dataset(
+                frame,
+                additional_rows,
+                progress_callback=lambda event: print(
+                    f"Generated {event['generated_rows']}/"
+                    f"{event['total_rows_to_generate']} rows "
+                    f"({event['progress']}%)"),
+            )
+
+            print(f"Updated dataset shape: {frame.shape}")
+
 
     print("\nCreating experiment plan...")
     try:
