@@ -1,3 +1,13 @@
+"""FastAPI server for the Autonomous ML Engineering Agent.
+
+Place this file at ``auto_ml_agent/server.py`` (next to ``main.py``).
+Start it from the repository root with:
+
+    uvicorn auto_ml_agent.server:app --reload
+
+The API deliberately orchestrates the existing engine modules instead of
+calling the interactive CUI entry point. The CLI in main.py remains unchanged.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -70,7 +80,6 @@ DEFAULT_CORS_ORIGINS = [
     "http://127.0.0.1:5173",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "*",
 ]
 CORS_ORIGINS = [
     item.strip()
@@ -435,6 +444,156 @@ def _check_cancelled(job: ExperimentJob) -> None:
     with job.lock:
         if job.cancel_requested:
             raise ExperimentCancelled("Cancellation was requested by the user.")
+
+
+# ---------------------------------------------------------------------------
+# Model Studio: generate run-specific, evidence-based charts
+# ---------------------------------------------------------------------------
+def _generate_model_studio(job: "ExperimentJob", result: dict[str, Any]) -> dict[str, Any]:
+    """Create charts from the saved metrics, fitted pipeline, and exact prepared run data.
+
+    Charts are optional outputs: a plotting/introspection failure must not fail a
+    successful training run. All files are scoped to this experiment's graphs/ folder.
+    """
+    graph_dir = job.run_dir / "graphs"
+    graph_dir.mkdir(parents=True, exist_ok=True)
+    generated: list[dict[str, str]] = []
+    warnings: list[str] = []
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import joblib
+        from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix
+        from .engine.dataset import split_data
+    except Exception as exc:
+        return {"generated": [], "warnings": [f"Graph dependencies unavailable: {type(exc).__name__}: {exc}"]}
+
+    def save(fig, filename: str, title: str, description: str) -> None:
+        path = graph_dir / filename
+        fig.tight_layout()
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        generated.append({"id": filename, "title": title, "description": description,
+                          "url": f"/api/experiments/{job.run_id}/artifacts/graphs/{filename}"})
+
+    # Candidate comparison: values are the trainer's actual validation scores.
+    try:
+        experiments = result.get("experiments") or []
+        experiments = [item for item in experiments if item.get("validation_score") is not None]
+        if experiments:
+            ordered = sorted(experiments, key=lambda item: float(item["validation_score"]), reverse=(result.get("problem_type") == "classification" or result.get("selection_metric") == "r2"))
+            names = [str(item.get("model", "model")) for item in ordered]
+            scores = [float(item["validation_score"]) for item in ordered]
+            fig, ax = plt.subplots(figsize=(9, max(3.4, 0.55 * len(names))))
+            bars = ax.barh(names[::-1], scores[::-1])
+            ax.set_title("Candidate model comparison · validation")
+            ax.set_xlabel(str(result.get("selection_metric", "validation score")).upper())
+            ax.grid(axis="x", alpha=.22)
+            for bar, value in zip(bars, scores[::-1]):
+                ax.text(bar.get_width(), bar.get_y()+bar.get_height()/2, f" {value:.4g}", va="center", fontsize=9)
+            save(fig, "candidate_comparison.png", "Candidate comparison", "Actual validation scores returned by the trainer.")
+    except Exception as exc:
+        warnings.append(f"Candidate comparison chart could not be generated: {exc}")
+
+    # Model and test diagnostics are only generated from the exact saved prepared data.
+    model_path_value = result.get("best_model_path")
+    data_path = job.run_dir / "prepared_training_data.csv"
+    try:
+        if not model_path_value:
+            raise FileNotFoundError("The result did not include a best-model path.")
+        model_path = Path(model_path_value)
+        if not model_path.is_absolute():
+            model_path = job.run_dir / "models" / model_path
+        if not model_path.is_file():
+            model_path = job.run_dir / "models" / "best_model.joblib"
+        if not model_path.is_file():
+            raise FileNotFoundError("The fitted best_model.joblib artifact was not found.")
+        model = joblib.load(model_path)
+
+        # Feature importance / coefficient magnitude from the fitted estimator.
+        try:
+            estimator = model.named_steps.get("model") if hasattr(model, "named_steps") else model
+            preprocess = model.named_steps.get("preprocess") if hasattr(model, "named_steps") else None
+            values = getattr(estimator, "feature_importances_", None)
+            importance_label = "Feature importance"
+            if values is None and getattr(estimator, "coef_", None) is not None:
+                coef = np.asarray(estimator.coef_)
+                values = np.mean(np.abs(coef), axis=0) if coef.ndim > 1 else np.abs(coef)
+                importance_label = "Absolute coefficient magnitude"
+            if values is not None:
+                values = np.asarray(values).ravel()
+                try:
+                    names = list(preprocess.get_feature_names_out()) if preprocess is not None else []
+                except Exception:
+                    names = []
+                if len(names) != len(values):
+                    names = [f"Feature {index+1}" for index in range(len(values))]
+                top = sorted(zip(names, values), key=lambda pair: float(pair[1]), reverse=True)[:20]
+                if top:
+                    labels = [str(pair[0]).replace("numeric__", "").replace("categorical__", "") for pair in top]
+                    scores = [float(pair[1]) for pair in top]
+                    fig, ax = plt.subplots(figsize=(10, max(4, .34 * len(labels))))
+                    bars = ax.barh(labels[::-1], scores[::-1])
+                    ax.set_title(f"Top features · {importance_label.lower()}")
+                    ax.set_xlabel(importance_label)
+                    ax.grid(axis="x", alpha=.22)
+                    save(fig, "feature_importance.png", "Feature insights", f"Derived from the fitted {result.get('best_model', 'best')} estimator; encoded features may appear separately.")
+            else:
+                warnings.append("This model does not expose native feature importance or coefficients; no feature-importance chart was fabricated.")
+        except Exception as exc:
+            warnings.append(f"Feature importance was unavailable: {exc}")
+
+        # Recreate the deterministic held-out split used by the existing trainer.
+        if data_path.is_file():
+            frame = pd.read_csv(data_path)
+            target = result.get("target_column")
+            problem_type = result.get("problem_type")
+            if target in frame.columns:
+                X_train, X_val, X_test, y_train, y_val, y_test = split_data(frame, target, problem_type)
+                predictions = model.predict(X_test)
+                diagnostic = pd.DataFrame({"actual": y_test.astype(str).to_numpy(), "predicted": pd.Series(predictions).astype(str).to_numpy()})
+                diagnostic.to_csv(graph_dir / "held_out_test_predictions.csv", index=False)
+                if problem_type == "classification":
+                    labels = list(pd.Series(y_test).astype(str).value_counts().index)
+                    labels = sorted(set(labels) | set(pd.Series(predictions).astype(str)))
+                    cm = confusion_matrix(pd.Series(y_test).astype(str), pd.Series(predictions).astype(str), labels=labels)
+                    fig, ax = plt.subplots(figsize=(max(5, .65*len(labels)), max(4, .6*len(labels))))
+                    display = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
+                    display.plot(ax=ax, cmap="Blues", colorbar=False, values_format="d", xticks_rotation=35)
+                    ax.set_title("Held-out test · confusion matrix")
+                    save(fig, "confusion_matrix.png", "Confusion matrix", "Computed from the same deterministic held-out split used for final evaluation.")
+                else:
+                    actual = pd.to_numeric(pd.Series(y_test), errors="coerce").to_numpy()
+                    predicted = pd.to_numeric(pd.Series(predictions), errors="coerce").to_numpy()
+                    valid = np.isfinite(actual) & np.isfinite(predicted)
+                    if valid.any():
+                        fig, ax = plt.subplots(figsize=(7, 6))
+                        ax.scatter(actual[valid], predicted[valid], alpha=.65, s=22)
+                        low = float(min(actual[valid].min(), predicted[valid].min()))
+                        high = float(max(actual[valid].max(), predicted[valid].max()))
+                        ax.plot([low, high], [low, high], linestyle="--", linewidth=1.5)
+                        ax.set_xlabel("Actual target")
+                        ax.set_ylabel("Predicted target")
+                        ax.set_title("Held-out test · actual vs predicted")
+                        ax.grid(alpha=.22)
+                        save(fig, "actual_vs_predicted.png", "Actual vs predicted", "Predictions from the saved model on the held-out test split.")
+                        residuals = actual[valid] - predicted[valid]
+                        fig, ax = plt.subplots(figsize=(8, 4.5))
+                        ax.scatter(predicted[valid], residuals, alpha=.65, s=22)
+                        ax.axhline(0, linestyle="--", linewidth=1.5)
+                        ax.set_xlabel("Predicted target")
+                        ax.set_ylabel("Residual (actual − predicted)")
+                        ax.set_title("Held-out test · residual diagnostics")
+                        ax.grid(alpha=.22)
+                        save(fig, "residuals.png", "Residual diagnostics", "Held-out residuals; patterns can indicate model error structure.")
+    except Exception as exc:
+        warnings.append(f"Model-based diagnostics could not be generated: {type(exc).__name__}: {exc}")
+
+    # Persist the index for the GUI and for inspection outside the browser.
+    payload = {"run_id": job.run_id, "generated": generated, "warnings": warnings}
+    _atomic_json(graph_dir / "index.json", payload)
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -947,10 +1106,14 @@ def _run_experiment(job: ExperimentJob, request: ExperimentCreateRequest) -> Non
                 details={"report": job.quality_report, "artifact": str(quality_path), "rows_after_preparation": len(frame)},
             )
 
+        # Save the exact prepared rows passed to the trainer. Model Studio uses this
+        # snapshot to reproduce the deterministic held-out split for diagnostics.
+        prepared_data_path = job.run_dir / "prepared_training_data.csv"
+        frame[final_plan.feature_columns + [final_plan.target_column]].to_csv(prepared_data_path, index=False)
         _emit(
             job,
             "training_started",
-            f"Training {len(final_plan.candidate_models)} model candidate(s). The current trainer reports per-model metrics when training returns, not continuous per-model percentage updates.",
+            f"Training {len(final_plan.candidate_models)} model candidate(s). The prepared dataset snapshot was saved for reproducible diagnostics.",
             progress=76,
             details={
                 "models": final_plan.candidate_models,
@@ -975,13 +1138,22 @@ def _run_experiment(job: ExperimentJob, request: ExperimentCreateRequest) -> Non
         result["training_wall_time_seconds"] = round(time.monotonic() - training_started, 2)
         result["run_id"] = job.run_id
         result["run_directory"] = str(job.run_dir)
+        try:
+            studio = _generate_model_studio(job, result)
+            result["model_studio"] = studio
+            _emit(job, "model_studio_generated", f"Model Studio generated {len(studio.get('generated', []))} chart(s).", progress=96,
+                  details={"graphs": studio.get("generated", []), "warnings": studio.get("warnings", [])})
+        except Exception as graph_exc:
+            result["model_studio"] = {"generated": [], "warnings": [f"Graph generation failed: {type(graph_exc).__name__}: {graph_exc}"]}
+            _emit(job, "model_studio_warning", "Training succeeded, but Model Studio chart generation had a problem.", level="warning",
+                  details=result["model_studio"])
         job.result = _json_safe(result)
         _atomic_json(job.run_dir / "result_summary.json", job.result)
         _emit(
             job,
             "training_complete",
             f"Training complete. Best model: {result.get('best_model', 'not reported')}.",
-            progress=96,
+            progress=98,
             details={"result": job.result, "metrics_artifact": str(job.run_dir / "models" / "metrics.json")},
         )
         _set_status(job, "succeeded")
@@ -1338,6 +1510,17 @@ def get_events(
         "latest_sequence": job.next_sequence - 1,
         "has_more": len(events) > limit,
     }
+
+
+@app.get("/api/experiments/{run_id}/model-studio", tags=["Results"])
+def get_model_studio(run_id: str) -> dict[str, Any]:
+    job = _get_job_or_404(run_id)
+    index_path = job.run_dir / "graphs" / "index.json"
+    if index_path.is_file():
+        return json.loads(index_path.read_text(encoding="utf-8"))
+    if job.result and job.result.get("model_studio"):
+        return {"run_id": run_id, **job.result["model_studio"]}
+    raise HTTPException(status_code=409, detail="Model Studio charts are not available until training completes.")
 
 
 @app.get("/api/experiments/{run_id}/artifacts", tags=["Results"])
