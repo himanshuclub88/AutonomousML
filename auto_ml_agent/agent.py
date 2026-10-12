@@ -70,8 +70,10 @@ def fallback_plan(use_case: str, columns: list[str] | None, target: str | None) 
     if columns:
         chosen_target = target or columns[-1]
         features = [c for c in columns if c != chosen_target]
+
         if not features:
             raise ValueError("CSV needs at least one feature and one target column.")
+        
         return MLExperimentPlan(
             problem_type="classification",
             target_column=chosen_target,
@@ -81,6 +83,7 @@ def fallback_plan(use_case: str, columns: list[str] | None, target: str | None) 
             generate_synthetic_data=False,
             reasoning="Fallback plan: classification is assumed. Verify problem type and target before accepting.",
         )
+    
     lowered = use_case.lower()
     regression_words = ("predict price", "forecast", "predict sales", "estimate", "regression", "numeric")
     problem_type = "regression" if any(word in lowered for word in regression_words) else "classification"
