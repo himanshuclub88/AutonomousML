@@ -18,6 +18,7 @@ from .engine.dataset import (
     write_data_quality_report,
     analyze_features,
 )
+from engine.data_set import augment_dataset
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -59,6 +60,12 @@ def main() -> None:
         if target and target not in columns:
             print(f"Target {target!r} is not present in the CSV.")
             return
+
+        answer = input("Generate additional data? [y/N]: ").strip().lower()
+
+        if answer in {"y", "yes"}:
+            additional_rows = int(input("How many additional rows? "))
+            frame = augment_dataset(frame, additional_rows)
 
     print("\nCreating experiment plan...")
     try:
