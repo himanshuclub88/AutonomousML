@@ -167,14 +167,6 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "plan.json").write_text(json.dumps(plan.model_dump(), indent=2), encoding="utf-8")
 
-    if backend == "colab":
-        try:
-            run_colab_job(plan=plan, dataset_path=csv_path, run_dir=run_dir)
-        except Exception as exc:
-            print(f"\nColab job was not started: {exc}")
-            print("Choose Local Python when you are ready to run experiments now.")
-        return
-
     try:
         if frame is None:
             frame = generate_synthetic(
@@ -265,22 +257,17 @@ def main() -> None:
         print(f"\nTraining {len(plan.candidate_models)} candidate model(s), up to {workers} concurrently...")
 
         if backend == "colab":
-            try:
-                run_colab_job(
-                    frame,
-                    target=plan.target_column,
-                    features=plan.feature_columns,
-                    problem_type=plan.problem_type,
-                    candidates=plan.candidate_models,
-                    metric=plan.evaluation_metric,
-                    run_dir=run_dir / "models",
-                    workers=workers,
-                )
-            except Exception as exc:
-                print(f"\nColab job was not started: {exc}")
-                print("Choose Local Python when you are ready to run experiments now.")
-            return
-        
+            print("\nSubmitting the prepared dataset to Google Colab for training...")
+            result = run_colab_job(
+                frame,
+                target=plan.target_column,
+                features=plan.feature_columns,
+                problem_type=plan.problem_type,
+                candidates=plan.candidate_models,
+                metric=plan.evaluation_metric,
+                run_dir=run_dir / "models",
+                workers=workers,
+            )
         else:
             result = run_local_job(
                 frame,
