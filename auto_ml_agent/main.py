@@ -263,16 +263,36 @@ def main() -> None:
 
         workers = min(4, len(plan.candidate_models))
         print(f"\nTraining {len(plan.candidate_models)} candidate model(s), up to {workers} concurrently...")
-        result = run_local_job(
-            frame,
-            target=plan.target_column,
-            features=plan.feature_columns,
-            problem_type=plan.problem_type,
-            candidates=plan.candidate_models,
-            metric=plan.evaluation_metric,
-            run_dir=run_dir / "models",
-            workers=workers,
-        )
+
+        if backend == "colab":
+            try:
+                run_colab_job(
+                    frame,
+                    target=plan.target_column,
+                    features=plan.feature_columns,
+                    problem_type=plan.problem_type,
+                    candidates=plan.candidate_models,
+                    metric=plan.evaluation_metric,
+                    run_dir=run_dir / "models",
+                    workers=workers,
+                )
+            except Exception as exc:
+                print(f"\nColab job was not started: {exc}")
+                print("Choose Local Python when you are ready to run experiments now.")
+            return
+        
+        else:
+            result = run_local_job(
+                frame,
+                target=plan.target_column,
+                features=plan.feature_columns,
+                problem_type=plan.problem_type,
+                candidates=plan.candidate_models,
+                metric=plan.evaluation_metric,
+                run_dir=run_dir / "models",
+                workers=workers,
+            )
+
         print("\n=== Experiment complete ===")
         print(json.dumps(result, indent=2))
         print(f"\nAll run artifacts: {run_dir}")
