@@ -338,11 +338,88 @@ def _set_status(job: ExperimentJob, status: str) -> None:
     _persist_job(job)
 
 
+def _restore_jobs_from_disk() -> None:
+    """Rebuild the in-memory experiment index from persisted run folders.
+
+    A Uvicorn reload/restart clears JOBS, but should not make existing run IDs
+    return 404 when their artifacts are still present on disk. Active jobs cannot
+    safely resume in a new process, so mark those as interrupted and preserve logs.
+    """
+    restored: dict[str, ExperimentJob] = {}
+    for run_dir in RUNS_DIR.iterdir():
+        if not run_dir.is_dir():
+            continue
+        job_file = run_dir / "job.json"
+        request_file = run_dir / "request.json"
+        try:
+            saved = json.loads(job_file.read_text(encoding="utf-8"))
+            run_id = str(saved.get("run_id") or run_dir.name)
+            request_data = saved.get("request_data")
+            if not isinstance(request_data, dict):
+                request_data = json.loads(request_file.read_text(encoding="utf-8"))
+            job = ExperimentJob(
+                run_id=run_id,
+                run_dir=run_dir,
+                request_data=request_data,
+                created_at=saved.get("created_at") or utc_now(),
+                started_at=saved.get("started_at"),
+                finished_at=saved.get("finished_at"),
+                status=saved.get("status", "failed"),
+                stage=saved.get("stage", "interrupted"),
+                progress=float(saved.get("progress") or 0),
+                message=saved.get("message") or "Restored from disk.",
+                initial_plan=saved.get("initial_plan"),
+                revised_plan=saved.get("revised_plan"),
+                final_plan=saved.get("final_plan"),
+                quality_report=saved.get("quality_report"),
+                result=saved.get("result"),
+                error=saved.get("error"),
+                pending_approval=saved.get("pending_approval"),
+                approval_timeout_minutes=int(request_data.get("approval_timeout_minutes") or DEFAULT_APPROVAL_TIMEOUT_MINUTES),
+            )
+            events_file = run_dir / "events.jsonl"
+            if events_file.exists():
+                for line in events_file.read_text(encoding="utf-8").splitlines():
+                    try:
+                        event = json.loads(line)
+                        if isinstance(event, dict) and "sequence" in event:
+                            job.events.append(event)
+                    except json.JSONDecodeError:
+                        continue
+            job.events.sort(key=lambda item: int(item.get("sequence", 0)))
+            job.next_sequence = max((int(e.get("sequence", 0)) for e in job.events), default=0) + 1
+
+            if job.status not in {"succeeded", "failed", "cancelled"}:
+                job.status = "failed"
+                job.finished_at = job.finished_at or utc_now()
+                job.pending_approval = None
+                job.error = {
+                    "type": "ServerRestarted",
+                    "message": "The API process restarted while this experiment was active. Existing files and logs were restored, but the training process cannot be resumed automatically. Start a new experiment to train again.",
+                }
+                _emit(
+                    job, "interrupted", job.error["message"], level="error",
+                    details={"restored_from_disk": True, "run_directory": str(run_dir)},
+                )
+            else:
+                _persist_job(job)
+            restored[run_id] = job
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            # Ignore incomplete folders; a run is restorable only with its metadata.
+            continue
+    with JOBS_LOCK:
+        JOBS.update(restored)
+
+
+# Restore previous run IDs after process startup, before serving API requests.
+_restore_jobs_from_disk()
+
+
 def _get_job_or_404(run_id: str) -> ExperimentJob:
     with JOBS_LOCK:
         job = JOBS.get(run_id)
     if not job:
-        raise HTTPException(status_code=404, detail=f"Experiment {run_id!r} was not found in this server session.")
+        raise HTTPException(status_code=404, detail=f"Experiment {run_id!r} was not found in the active registry or workspace metadata.")
     return job
 
 
