@@ -31,3 +31,5 @@ settings = Settings(
     llm_model=_get("LLM_MODEL"),
     timezone=_get("TIMEZONE", "Asia/Kolkata"),
 )
+
+COLLAB_RUNTIME = _get('COLLAB_RUNTIME')
