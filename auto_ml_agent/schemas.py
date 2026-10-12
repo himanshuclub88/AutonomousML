@@ -11,7 +11,7 @@ class MLExperimentPlan(BaseModel):
     candidate_models: list[str] = Field(min_length=1, max_length=4)
     evaluation_metric: Literal["accuracy", "f1_weighted", "roc_auc", "rmse", "mae", "r2"]
     generate_synthetic_data: bool
-    synthetic_rows: int = Field(default=1500, ge=200, le=20000)
+    synthetic_rows: int = Field(default=3000, ge=200, le=20000)
     reasoning: str = Field(description="Brief explanation of the plan.")
 
 class ExperimentRequest(BaseModel):

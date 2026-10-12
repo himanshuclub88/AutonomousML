@@ -101,7 +101,7 @@ def fallback_plan(use_case: str, columns: list[str] | None, target: str | None) 
         candidate_models=models,
         evaluation_metric="rmse" if problem_type == "regression" else "f1_weighted",
         generate_synthetic_data=True,
-        synthetic_rows=1500,
+        synthetic_rows=3000,
         reasoning="Fallback plan based on keywords. Review the task type before training.",
     )
 
