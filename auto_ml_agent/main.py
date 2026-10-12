@@ -4,7 +4,8 @@ import json
 import uuid
 from datetime import datetime
 from pathlib import Path
-
+from math import ceil
+from collections.abc import Callable
 import pandas as pd
 
 from .agent import create_plan, review_plan_with_data_quality
@@ -18,7 +19,67 @@ from .engine.dataset import (
     write_data_quality_report,
     analyze_features,
 )
-from engine.data_set import augment_dataset
+
+from .engine.llmdatagen import build_dataset_profile, generate_batch
+
+
+def augment_dataset(
+    frame: pd.DataFrame,
+    additional_rows: int,
+    batch_size: int = 100,
+    progress_callback: Callable[[dict], None] | None = None,
+) -> pd.DataFrame:
+    """Generate data in batches and report progress to the caller."""
+
+    if additional_rows < 1:
+        raise ValueError("additional_rows must be positive.")
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive.")
+
+    total_batches = ceil(additional_rows / batch_size)
+    profile = build_dataset_profile(frame)
+    generated_batches = []
+    generated_count = 0
+
+    for batch_number in range(1, total_batches + 1):
+        current_batch_size = min(
+            batch_size,
+            additional_rows - generated_count,
+        )
+
+        batch = generate_batch(
+            frame,
+            current_batch_size,
+            batch_number=batch_number,
+            dataset_profile=profile,
+        )
+
+        generated_batches.append(batch)
+        generated_count += len(batch)
+
+        event = {
+            "stage": "data_generation",
+            "batch": batch_number,
+            "total_batches": total_batches,
+            "generated_rows": generated_count,
+            "total_rows_to_generate": additional_rows,
+            "progress": round(
+                generated_count / additional_rows * 100, 2
+            ),
+            "message": (
+                f"Generated {generated_count} "
+                f"of {additional_rows} rows"
+            ),
+        }
+
+        if progress_callback is not None:
+            progress_callback(event)
+        else:
+            print(event["message"])
+
+    generated_frame = pd.concat(generated_batches, ignore_index=True)
+    return pd.concat([frame.copy(), generated_frame], ignore_index=True)
+
 
 
 ROOT = Path(__file__).resolve().parent.parent
