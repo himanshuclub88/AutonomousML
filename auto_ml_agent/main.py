@@ -10,7 +10,7 @@ import pandas as pd
 from .agent import create_plan
 from .backends.colab import run_colab_job
 from .backends.local import run_local_job
-from .engine.dataset import generate_synthetic, inspect_csv
+from .engine.dataset import generate_synthetic, inspect_csv, validate_generated_data
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNS_DIR = ROOT / "workspace" / "runs"
@@ -85,6 +85,14 @@ def main() -> None:
                 target=plan.target_column,
                 features=plan.feature_columns,
                 rows=plan.synthetic_rows,
+                use_case=use_case,
+            )
+
+            validate_generated_data(
+                frame,
+                target=plan.target_column,
+                features=plan.feature_columns,
+                expected_rows=plan.synthetic_rows,
             )
             frame.to_csv(run_dir / "synthetic_dataset.csv", index=False)
             print(f"Generated demonstration dataset with {len(frame):,} rows.")
