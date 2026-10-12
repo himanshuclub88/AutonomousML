@@ -26,7 +26,7 @@ from .engine.llmdatagen import build_dataset_profile, generate_batch
 def augment_dataset(
     frame: pd.DataFrame,
     additional_rows: int,
-    batch_size: int = 100,
+    batch_size: int = 200,
     progress_callback: Callable[[dict], None] | None = None,
 ) -> pd.DataFrame:
     """Generate data in batches and report progress to the caller."""
@@ -42,6 +42,8 @@ def augment_dataset(
     generated_count = 0
 
     for batch_number in range(1, total_batches + 1):
+        print(f"genrating batch number: {batch_number} / {total_batches}" ,end="\r", flush=True)
+
         current_batch_size = min(
             batch_size,
             additional_rows - generated_count,
