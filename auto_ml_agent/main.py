@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .agent import create_plan
+from .agent import create_plan, review_plan_with_data_quality
 from .backends.colab import run_colab_job
 from .backends.local import run_local_job
 from .engine.dataset import (
@@ -145,6 +145,31 @@ def main() -> None:
 
         print("\n--- Data quality report ---")
         print(json.dumps(quality_report, indent=2))
+
+
+        # Phase 3: let the LLM review the initial plan.
+        revised_plan = review_plan_with_data_quality(
+            plan,
+            use_case=use_case,
+            quality_report=quality_report,
+        )
+
+        print("\n--- Revised experiment plan ---")
+        print(json.dumps(revised_plan.model_dump(), indent=2))
+
+        if input("\nContinue with revised plan? [y/N]: ").strip().lower() != "y":
+            print("Cancelled; no model training was started.")
+            return
+
+        # Use the reviewed plan for subsequent training.
+        plan = revised_plan
+
+        # Save the final reviewed plan.
+        (run_dir / "plan.json").write_text(
+            json.dumps(plan.model_dump(), indent=2),
+            encoding="utf-8",
+        )
+
 
 
         workers = min(4, len(plan.candidate_models))
