@@ -20,7 +20,7 @@ import requests
 
 
 COLAB_API = "https://colaboratory.googleapis.com/v1beta"
-DEFAULT_RUNTIME = "runtimes/r-6f49ecb3-e213-4796-b4d1-6923be00f80e"
+DEFAULT_RUNTIME = "runtimes/automl-t4-runtime"
 
 
 class ColabAccessRequired(RuntimeError):
@@ -52,54 +52,147 @@ def _google_credentials():
 
 
 def _get_runtime_connection() -> tuple[str, str]:
-    """Fetch fresh connection details for an existing Colab runtime."""
+    """Get connection details, creating a replacement runtime if the saved one is gone.
+
+    Runtime names are not credentials. Fresh proxy URL/token values are fetched on
+    every run and are never written to disk or printed.
+    """
     credentials = _google_credentials()
     project = os.getenv("GOOGLE_CLOUD_PROJECT", "537909573529").strip()
-    runtime_name = os.getenv("COLAB_RUNTIME_NAME", DEFAULT_RUNTIME).strip().strip("/")
-    if not runtime_name:
-        raise ColabAccessRequired(
-            "Set COLAB_RUNTIME_NAME to an existing Colab runtime resource name."
-        )
-
-    # Always build an absolute URL. requests.get('/runtimes/...') is invalid.
-    api_root = "https://colaboratory.googleapis.com/v1beta"
-    runtime_path = runtime_name
-    if runtime_path.startswith("https://") or runtime_path.startswith("http://"):
-        raise ColabAccessRequired(
-            "COLAB_RUNTIME_NAME must be a runtime resource name, not a URL."
-        )
-    if runtime_path.startswith("projects/"):
-        # A fully-qualified resource name is accepted as-is after the API root.
-        pass
-    elif not runtime_path.startswith("runtimes/"):
-        runtime_path = "runtimes/" + runtime_path
-    url = api_root + "/" + runtime_path.lstrip("/")
-
-    headers = {"Authorization": f"Bearer {credentials.token}"}
+    api_root = COLAB_API.rstrip("/")
+    headers = {
+        "Authorization": f"Bearer {credentials.token}",
+        "Content-Type": "application/json",
+    }
     if project:
         headers["x-goog-user-project"] = project
+
+    # Persist only the non-secret runtime resource name so the app can reuse it
+    # across PowerShell sessions. Never persist connectionInfo or its token.
+    project_root = Path(__file__).resolve().parents[2]
+    runtime_config = project_root / "workspace" / "colab_runtime.json"
+    runtime_config.parent.mkdir(parents=True, exist_ok=True)
+
+    env_name = os.getenv("COLAB_RUNTIME_NAME", "").strip().strip("/")
+    saved_name = ""
     try:
+        if runtime_config.exists():
+            saved_name = str(json.loads(runtime_config.read_text(encoding="utf-8")).get("runtime_name", "")).strip().strip("/")
+    except (OSError, ValueError, TypeError):
+        saved_name = ""
+
+    # Explicit environment setting wins; otherwise reuse the saved runtime name.
+    runtime_name = env_name or saved_name or DEFAULT_RUNTIME.strip().strip("/")
+    if runtime_name.startswith(("https://", "http://")):
+        raise ColabAccessRequired("COLAB_RUNTIME_NAME must be a runtime resource name, not a URL.")
+    if runtime_name.startswith("projects/"):
+        runtime_path = runtime_name
+    elif runtime_name.startswith("runtimes/"):
+        runtime_path = runtime_name
+    else:
+        runtime_path = "runtimes/" + runtime_name
+
+    def get_runtime(name: str):
+        url = f"{api_root}/{name.lstrip('/')}"
         response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-        runtime = response.json()
-    except Exception as exc:
-        raise ColabAccessRequired(
-            f"Could not retrieve Colab runtime {runtime_name!r}. Request URL was "
-            f"{url!r}. Confirm the runtime exists and the Colab API is enabled for "
-            f"project {project!r}. Details: {exc}"
-        ) from exc
+        if response.status_code == 404:
+            return None
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            detail = response.text[:1200]
+            raise ColabAccessRequired(
+                f"Could not retrieve Colab runtime {name!r} (HTTP {response.status_code}). "
+                f"Project: {project!r}. Details: {detail}"
+            ) from exc
+        return response.json()
+
+    runtime = get_runtime(runtime_path)
+
+    # If the saved runtime is gone, request a fresh runtime with a unique ID.
+    if runtime is None:
+        runtime_id = "automl-t4-" + uuid.uuid4().hex[:12]
+        create_url = f"{api_root}/runtimes"
+        payload = {
+            "runtimeSpec": {
+                "variant": "VARIANT_GPU",
+                "accelerator": "T4",
+                "shape": "SHAPE_STANDARD",
+            }
+        }
+        try:
+            response = requests.post(
+                create_url,
+                params={"runtimeId": runtime_id},
+                headers=headers,
+                json=payload,
+                timeout=60,
+            )
+            response.raise_for_status()
+            created = response.json()
+        except Exception as exc:
+            detail = getattr(locals().get("response"), "text", "")[:1200]
+            raise ColabAccessRequired(
+                "The configured Colab runtime was not found, and creating a replacement T4 "
+                f"runtime failed. Check Colab API runtime-creation access. Details: {detail or exc}"
+            ) from exc
+
+        if created.get("error"):
+            err = created["error"]
+            raise ColabAccessRequired(
+                "Colab refused to create a replacement T4 runtime: "
+                + str(err.get("message", err))
+            )
+
+        created_name = (
+            (created.get("metadata") or {}).get("runtime")
+            or (created.get("response") or {}).get("name")
+            or created.get("name")
+        )
+        if not created_name:
+            raise ColabAccessRequired(
+                "Colab accepted the create request but did not return a runtime resource name. "
+                f"Response keys: {sorted(created.keys())}"
+            )
+        runtime_path = created_name.strip("/")
+        if runtime_path.startswith("https://"):
+            raise ColabAccessRequired("Colab returned an unexpected URL instead of a runtime resource name.")
+
+        # Creation may be asynchronous. Poll briefly for the runtime to become readable.
+        deadline = time.time() + 180
+        runtime = None
+        while time.time() < deadline:
+            runtime = get_runtime(runtime_path)
+            if runtime and (runtime.get("connectionInfo") or runtime.get("connection_info")):
+                break
+            time.sleep(3)
+        if not runtime:
+            raise ColabAccessRequired(
+                f"Colab created or accepted runtime {runtime_path!r}, but it is not readable yet. "
+                "Wait a minute and retry."
+            )
 
     connection = runtime.get("connectionInfo") or runtime.get("connection_info") or {}
     runtime_url = connection.get("url") or connection.get("runtimeUrl") or connection.get("runtime_url")
     token = connection.get("token") or connection.get("proxyToken") or connection.get("proxy_token")
     if not runtime_url or not token:
-        state = runtime.get("state", "unknown")
+        state = runtime.get("runtimeState", runtime.get("state", "unknown"))
         raise ColabAccessRequired(
-            f"Colab runtime did not provide connection information (state={state!r}). "
-            "The runtime may still be starting or may have expired. Start/recreate it and retry."
+            f"Colab runtime {runtime_path!r} exists but did not provide connection information "
+            f"(state={state!r}). It may still be starting. Retry in a minute."
         )
-    return runtime_url.rstrip("/"), token
 
+    # Save only the resource name; always fetch a fresh connection token next run.
+    try:
+        runtime_config.write_text(
+            json.dumps({"runtime_name": runtime_path}, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        # Runtime still works for this run even if persistence is unavailable.
+        pass
+
+    return runtime_url.rstrip("/"), token
 
 def _remote_training_script(csv_b64: str, target: str, features: list[str], problem_type: str,
                             candidates: list[str], metric: str, workers: int) -> str:
