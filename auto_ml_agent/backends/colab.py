@@ -338,7 +338,14 @@ except Exception:
 """.replace("__CONFIG_JSON__", repr(json.dumps(config)))
 
 
-def _execute_on_runtime(code: str, runtime_url: str, proxy_token: str) -> str:
+def _execute_on_runtime(
+    code: str,
+    runtime_url: str,
+    proxy_token: str,
+    *,
+    log_path: Path | None = None,
+) -> str:
+    """Execute code and collect output until both execute_reply and IOPub idle arrive."""
     try:
         import websocket
     except ImportError as exc:
@@ -347,73 +354,181 @@ def _execute_on_runtime(code: str, runtime_url: str, proxy_token: str) -> str:
     headers = [f"X-Colab-Runtime-Proxy-Token: {proxy_token}"]
     base = runtime_url.rstrip("/")
     session = str(uuid.uuid4())
+    kernel_id = None
+    ws = None
+    output: list[str] = []
+    diagnostic: list[str] = []
+
     try:
         response = requests.post(
             base + "/api/kernels",
             headers={"X-Colab-Runtime-Proxy-Token": proxy_token},
-            json={"name": "python3"}, timeout=30,
+            json={"name": "python3"},
+            timeout=30,
         )
         response.raise_for_status()
         kernel_id = response.json()["id"]
     except Exception as exc:
         raise ColabAccessRequired(
-            "Could not create a Python kernel on the Colab runtime. The runtime may be disconnected. Details: " + str(exc)
+            "Could not create a Python kernel on the Colab runtime. "
+            "The runtime may be disconnected. Details: " + str(exc)
         ) from exc
 
     ws_url = base.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
     ws_url += f"/api/kernels/{kernel_id}/channels?session_id={session}"
-    ws = None
+
     try:
         ws = websocket.create_connection(
-            ws_url, header=headers, timeout=60, origin=base,
+            ws_url,
+            header=headers,
+            timeout=15,
+            origin=base,
             suppress_origin=False,
         )
         msg_id = uuid.uuid4().hex
         message = {
-            "header": {"msg_id": msg_id, "username": "automl-agent", "session": session,
-                       "msg_type": "execute_request", "version": "5.3"},
-            "parent_header": {}, "metadata": {},
-            "content": {"code": code, "silent": False, "store_history": False,
-                        "user_expressions": {}, "allow_stdin": False, "stop_on_error": True},
-            "channel": "shell", "buffers": [],
+            "header": {
+                "msg_id": msg_id,
+                "username": "automl-agent",
+                "session": session,
+                "msg_type": "execute_request",
+                "version": "5.3",
+            },
+            "parent_header": {},
+            "metadata": {},
+            "content": {
+                "code": code,
+                "silent": False,
+                "store_history": False,
+                "user_expressions": {},
+                "allow_stdin": False,
+                "stop_on_error": True,
+            },
+            "channel": "shell",
+            "buffers": [],
         }
         ws.send(json.dumps(message))
-        output = []
-        deadline = time.time() + int(os.getenv("COLAB_EXECUTION_TIMEOUT_SECONDS", "3600"))
+
+        timeout_seconds = max(60, int(os.getenv("COLAB_EXECUTION_TIMEOUT_SECONDS", "3600")))
+        deadline = time.time() + timeout_seconds
+        reply_received = False
+        idle_received = False
+        reply_status = None
+
         while time.time() < deadline:
-            ws.settimeout(min(60, max(1, deadline - time.time())))
-            raw = ws.recv()
+            # A short receive timeout lets us keep waiting for the other channel's
+            # completion message instead of treating a quiet interval as failure.
+            ws.settimeout(min(15, max(1, deadline - time.time())))
+            try:
+                raw = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                continue
             if not raw:
                 continue
-            msg = json.loads(raw)
+
+            try:
+                msg = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                diagnostic.append("[non-JSON websocket message received]")
+                continue
+
             parent = msg.get("parent_header") or {}
             if parent.get("msg_id") != msg_id:
                 continue
+
             msg_type = (msg.get("header") or {}).get("msg_type")
+            channel = msg.get("channel")
             content = msg.get("content") or {}
+
             if msg_type == "stream":
-                output.append(content.get("text", ""))
+                chunk = content.get("text", "")
+                output.append(chunk)
+                # Do not duplicate enormous binary artifact chunks in the
+                # diagnostic file; preserve normal output and remote errors.
+                if "AUTOML_ZIP_CHUNK:" not in chunk:
+                    diagnostic.append(chunk)
             elif msg_type == "error":
-                output.append("\n".join(content.get("traceback") or [content.get("evalue", "Remote execution error")]))
+                error_text = "\n".join(
+                    content.get("traceback")
+                    or [content.get("ename", "Remote execution error") + ": "
+                        + content.get("evalue", "")]
+                )
+                output.append("\n" + error_text + "\n")
+                diagnostic.append("\n[REMOTE EXECUTION ERROR]\n" + error_text + "\n")
             elif msg_type == "execute_reply":
-                if content.get("status") != "ok":
-                    raise RuntimeError("Colab kernel execution failed:\n" + "".join(output))
-                return "".join(output)
-        raise TimeoutError("Timed out waiting for the Colab training job to finish.")
+                reply_received = True
+                reply_status = content.get("status")
+                if reply_status != "ok":
+                    # Continue collecting until idle so the traceback is captured.
+                    diagnostic.append(
+                        f"\n[execute_reply status={reply_status!r}]\n"
+                    )
+            elif msg_type == "status" and content.get("execution_state") == "idle":
+                idle_received = True
+
+            if reply_received and idle_received:
+                if reply_status != "ok":
+                    raise RuntimeError(
+                        "Colab kernel execution failed. "
+                        "See colab_runtime_output.log in the run directory."
+                    )
+                result = "".join(output)
+                if log_path:
+                    try:
+                        log_path.parent.mkdir(parents=True, exist_ok=True)
+                        log_path.write_text(
+                            "".join(diagnostic)[-500_000:],
+                            encoding="utf-8",
+                        )
+                    except OSError:
+                        pass
+                return result
+
+        diagnostic.append(
+            "\n[TIMEOUT] "
+            f"execute_reply_received={reply_received}, "
+            f"idle_received={idle_received}, reply_status={reply_status!r}\n"
+        )
+        if log_path:
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text("".join(diagnostic)[-500_000:], encoding="utf-8")
+            except OSError:
+                pass
+        raise TimeoutError(
+            "Timed out waiting for Colab completion "
+            f"(execute_reply_received={reply_received}, idle_received={idle_received}). "
+            "See colab_runtime_output.log in the run directory."
+        )
     except Exception as exc:
         if isinstance(exc, (RuntimeError, TimeoutError)):
+            if log_path and not Path(log_path).exists():
+                try:
+                    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+                    Path(log_path).write_text(
+                        "".join(diagnostic)[-500_000:], encoding="utf-8"
+                    )
+                except OSError:
+                    pass
             raise
-        raise ColabAccessRequired("Could not communicate with the Colab Jupyter kernel: " + str(exc)) from exc
+        raise ColabAccessRequired(
+            "Could not communicate with the Colab Jupyter kernel: " + str(exc)
+        ) from exc
     finally:
         if ws is not None:
             try:
                 ws.close()
             except Exception:
                 pass
-        try:
-            requests.delete(base + f"/api/kernels/{kernel_id}", headers={"X-Colab-Runtime-Proxy-Token": proxy_token}, timeout=10)
-        except Exception:
-            pass
+        if kernel_id:
+            try:
+                requests.delete(
+                    base + f"/api/kernels/{kernel_id}",
+                    headers={"X-Colab-Runtime-Proxy-Token": proxy_token},
+                    timeout=10,
+                )
+            except Exception:
+                pass
 
 
 def run_colab_job(frame: pd.DataFrame, *, target: str, features: list[str],
@@ -439,7 +554,10 @@ def run_colab_job(frame: pd.DataFrame, *, target: str, features: list[str],
     print("Connecting to Google Colab runtime (credentials and proxy token are kept private)...", flush=True)
     runtime_url, proxy_token = _get_runtime_connection()
     print("Connected. Training will run remotely; the prepared dataset is being transferred.", flush=True)
-    output = _execute_on_runtime(code, runtime_url, proxy_token)
+    output = _execute_on_runtime(
+        code, runtime_url, proxy_token,
+        log_path=run_dir / "colab_runtime_output.log",
+    )
 
     remote_error = next((line[len("AUTOML_REMOTE_ERROR:"):] for line in output.splitlines()
                          if line.startswith("AUTOML_REMOTE_ERROR:")), None)
@@ -448,7 +566,11 @@ def run_colab_job(frame: pd.DataFrame, *, target: str, features: list[str],
     result_line = next((line[len("AUTOML_RESULT_JSON:"):] for line in output.splitlines()
                         if line.startswith("AUTOML_RESULT_JSON:")), None)
     if not result_line:
-        raise RuntimeError("Colab finished without returning metrics. Check runtime logs and retry.")
+        raise RuntimeError(
+            "Colab finished without returning metrics. Diagnostic output was saved to "
+            + str(run_dir / "colab_runtime_output.log")
+            + ". Inspect that file for remote errors or missing output messages."
+        )
     result = json.loads(result_line)
 
     chunks: dict[int, str] = {}
