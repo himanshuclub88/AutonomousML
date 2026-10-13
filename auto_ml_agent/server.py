@@ -1334,11 +1334,7 @@ def delete_dataset(dataset_id: str) -> dict[str, Any]:
 
 @app.post("/api/experiments", status_code=202, tags=["Experiments"])
 def create_experiment(request: ExperimentCreateRequest) -> dict[str, Any]:
-    if request.backend == "colab":
-        raise HTTPException(
-            status_code=409,
-            detail="Google Colab is not configured yet. Select Local Python; the existing Colab backend intentionally raises an access-required error.",
-        )
+    # Colab is supported by the remote training adapter; do not reject it here.
     if request.dataset_id:
         record = _resolve_dataset(request.dataset_id)
         try:
