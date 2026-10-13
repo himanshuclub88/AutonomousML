@@ -896,12 +896,8 @@ def _run_experiment(job: ExperimentJob, request: ExperimentCreateRequest) -> Non
 
     try:
         _check_cancelled(job)
-        if request.backend == "colab":
-            # The current backend deliberately raises ColabAccessRequired; be transparent before spending time on planning.
-            raise RuntimeError(
-                "Google Colab execution is not configured in the existing project. "
-                "Choose Local Python until the approved Colab API/runtime integration is available."
-            )
+        # Both backends share planning, data preparation, quality analysis, and
+        # approval checkpoints. The selected backend is used only for training.
 
         if request.dataset_id:
             dataset_record = _resolve_dataset(request.dataset_id)
@@ -1125,16 +1121,30 @@ def _run_experiment(job: ExperimentJob, request: ExperimentCreateRequest) -> Non
             },
         )
         training_started = time.monotonic()
-        result = run_local_job(
-            frame,
-            target=final_plan.target_column,
-            features=final_plan.feature_columns,
-            problem_type=final_plan.problem_type,
-            candidates=final_plan.candidate_models,
-            metric=final_plan.evaluation_metric,
-            run_dir=job.run_dir / "models",
-            workers=min(4, len(final_plan.candidate_models)),
-        )
+        training_args = {
+            "target": final_plan.target_column,
+            "features": final_plan.feature_columns,
+            "problem_type": final_plan.problem_type,
+            "candidates": final_plan.candidate_models,
+            "metric": final_plan.evaluation_metric,
+            "run_dir": job.run_dir / "models",
+            "workers": min(4, len(final_plan.candidate_models)),
+        }
+        if request.backend == "colab":
+            _emit(
+                job,
+                "colab_training",
+                "Submitting the prepared dataset to Google Colab for remote training.",
+                progress=80,
+                details={
+                    "backend": "google_colab",
+                    "models": final_plan.candidate_models,
+                    "rows": len(frame),
+                },
+            )
+            result = run_colab_job(frame, **training_args)
+        else:
+            result = run_local_job(frame, **training_args)
         result["training_wall_time_seconds"] = round(time.monotonic() - training_started, 2)
         result["run_id"] = job.run_id
         result["run_directory"] = str(job.run_dir)
@@ -1225,7 +1235,7 @@ def capabilities() -> dict[str, Any]:
         "dataset_sources": ["csv_upload", "synthetic_demo"],
         "backends": [
             {"id": "local", "label": "Local Python", "available": True},
-            {"id": "colab", "label": "Google Colab", "available": False, "reason": "Colab API access/runtime integration is not configured in the existing project."},
+            {"id": "colab", "label": "Google Colab", "available": True, "reason": None},
         ],
         "problem_types": ["classification", "regression"],
         "models": {key: sorted(values) for key, values in ALLOWED_MODELS.items()},
