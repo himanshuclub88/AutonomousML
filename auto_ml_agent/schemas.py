@@ -12,6 +12,7 @@ ProblemType = Literal[
     "forecasting",
     "clustering",
     "anomaly_detection",
+    "dimensionality_reduction",
 ]
 
 EvaluationMetric = Literal[
@@ -32,36 +33,72 @@ EvaluationMetric = Literal[
     "silhouette_score",
     "davies_bouldin_score",
     "calinski_harabasz_score",
+
+    # Dimensionality reduction
+    "explained_variance",
+    "reconstruction_error",
+
+    # Tasks where a conventional metric is unavailable
+    "not_applicable",
 ]
+
+
+TASK_METRICS = {
+    "classification": {
+        "accuracy",
+        "f1_weighted",
+        "roc_auc",
+        "average_precision",
+    },
+    "regression": {"rmse", "mae", "r2"},
+    "forecasting": {"rmse", "mae", "r2", "mape", "smape"},
+    "clustering": {
+        "silhouette_score",
+        "davies_bouldin_score",
+        "calinski_harabasz_score",
+        "not_applicable",
+    },
+    "anomaly_detection": {
+        "roc_auc",
+        "average_precision",
+        "not_applicable",
+    },
+    "dimensionality_reduction": {
+        "explained_variance",
+        "reconstruction_error",
+        "not_applicable",
+    },
+}
 
 
 class MLExperimentPlan(BaseModel):
     problem_type: ProblemType = Field(
         description=(
-            "ML task type: classification, regression, forecasting, "
-            "clustering, or anomaly_detection."
+            "Choose classification, regression, forecasting, clustering, "
+            "anomaly_detection, or dimensionality_reduction."
         )
     )
 
     target_column: str | None = Field(
         default=None,
         description=(
-            "Target column for supervised tasks and forecasting. "
-            "May be None for clustering or unsupervised anomaly detection."
+            "Target column for supervised learning and forecasting. "
+            "May be None for clustering, unsupervised anomaly detection, "
+            "and dimensionality reduction."
         ),
     )
 
     feature_columns: list[str] = Field(
         min_length=1,
-        description="Input feature columns used by the experiment.",
+        description="Input columns used by the experiment.",
     )
 
     candidate_models: list[str] = Field(
         min_length=1,
         max_length=4,
         description=(
-            "One to four supported model identifiers appropriate "
-            "for the selected ML task."
+            "Between one and four supported model identifiers "
+            "appropriate for the selected task."
         ),
     )
 
@@ -71,8 +108,8 @@ class MLExperimentPlan(BaseModel):
 
     generate_synthetic_data: bool = Field(
         description=(
-            "Whether to use generated demonstration data instead of "
-            "an uploaded dataset."
+            "Whether synthetic demonstration data should be generated. "
+            "Python code must enforce the actual data-source choice."
         ),
     )
 
@@ -80,15 +117,15 @@ class MLExperimentPlan(BaseModel):
         default=3000,
         ge=200,
         le=20000,
-        description="Number of rows to generate for synthetic data.",
+        description="Number of rows for synthetic demonstration data.",
     )
 
     reasoning: str = Field(
-        description="Brief explanation of why this task and models were selected.",
+        description="Brief explanation of the selected task and models.",
     )
 
     @model_validator(mode="after")
-    def validate_task_requirements(self) -> "MLExperimentPlan":
+    def validate_plan(self) -> "MLExperimentPlan":
         supervised_tasks = {
             "classification",
             "regression",
@@ -97,25 +134,34 @@ class MLExperimentPlan(BaseModel):
 
         if self.problem_type in supervised_tasks and not self.target_column:
             raise ValueError(
-                f"{self.problem_type} requires a target_column."
+                f"{self.problem_type} requires a target column."
             )
 
-        if self.target_column and self.target_column in self.feature_columns:
+        if (
+            self.target_column is not None
+            and self.target_column in self.feature_columns
+        ):
             raise ValueError(
-                "target_column must not also appear in feature_columns."
+                "The target column cannot also be a feature column."
             )
+
+        if len(self.feature_columns) != len(set(self.feature_columns)):
+            raise ValueError("Feature columns must not contain duplicates.")
 
         if len(self.candidate_models) != len(set(self.candidate_models)):
-            raise ValueError("candidate_models must not contain duplicates.")
+            raise ValueError("Candidate models must not contain duplicates.")
+
+        if self.evaluation_metric not in TASK_METRICS[self.problem_type]:
+            raise ValueError(
+                f"Metric {self.evaluation_metric!r} is not appropriate "
+                f"for {self.problem_type}."
+            )
 
         return self
 
 
 class ExperimentRequest(BaseModel):
-    use_case: str = Field(
-        min_length=1,
-        description="Natural-language description of the ML problem.",
-    )
+    use_case: str = Field(min_length=1)
 
     backend: Literal["local", "colab"] = "local"
 
