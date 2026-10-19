@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import numpy as np
 import pandas as pd
-from sklearn.datasets import make_classification, make_regression
+from sklearn.datasets import make_classification, make_regression, make_blobs
 
 def inspect_csv(path: str) -> tuple[pd.DataFrame, list[str]]:
     """Load a CSV dataset and return its columns."""
@@ -47,6 +47,37 @@ def generate_synthetic(
 
     # Generic fallback for other ML tasks.
     n_features = max(2, len(features))
+
+    if problem_type in {"clustering", "anomaly_detection", "dimensionality_reduction"}:
+        # Unsupervised workflows have no label. main.py still requires a target
+        # field, so that field is generated as an ordinary input feature.
+        input_names = list(dict.fromkeys(features + [target]))
+        n_features = max(2, len(input_names))
+        rng = np.random.default_rng(random_state)
+
+        if problem_type == "clustering":
+            centers = min(4, max(2, rows // 20))
+            X, _ = make_blobs(
+                n_samples=rows,
+                n_features=n_features,
+                centers=centers,
+                cluster_std=1.8,
+                random_state=random_state,
+            )
+        else:
+            X = rng.normal(size=(rows, n_features))
+            if problem_type == "anomaly_detection":
+                anomaly_count = max(1, int(rows * 0.03))
+                anomaly_rows = rng.choice(rows, size=anomaly_count, replace=False)
+                X[anomaly_rows] += rng.normal(0, 8, size=(anomaly_count, n_features))
+            else:
+                # Correlated dimensions make PCA/SVD demonstrations meaningful.
+                if n_features > 1:
+                    X[:, 1:] = 0.7 * X[:, [0]] + 0.3 * X[:, 1:]
+
+        while len(input_names) < n_features:
+            input_names.append(f"feature_{len(input_names) + 1}")
+        return pd.DataFrame(X, columns=input_names[:n_features])
 
     if problem_type == "regression":
         X, y = make_regression(
@@ -222,7 +253,11 @@ def prepare_dataset(
     if missing_features:
         raise ValueError(f"Planned feature columns are missing from the dataset: {missing_features}")
 
-    if problem_type not in {"classification", "regression"}:
+    supported_types = {
+        "classification", "regression", "clustering",
+        "anomaly_detection", "dimensionality_reduction",
+    }
+    if problem_type not in supported_types:
         raise ValueError(f"Unsupported problem type: {problem_type!r}")
 
     required = features + [target]
@@ -246,8 +281,12 @@ def prepare_dataset(
             infinity_counts[str(column)] = count
             clean.loc[mask, column] = np.nan
 
+    is_unsupervised = problem_type in {
+        "clustering", "anomaly_detection", "dimensionality_reduction"
+    }
     invalid_target_rows = int(clean[target].isna().sum())
-    clean = clean.dropna(subset=[target]).copy()
+    if not is_unsupervised:
+        clean = clean.dropna(subset=[target]).copy()
 
     # Regression requires a numeric target. Avoid silently converting arbitrary
     # strings into numbers or guessing how labels should be interpreted.
@@ -257,14 +296,15 @@ def prepare_dataset(
             f"{clean[target].dtype!s}."
         )
 
-    if clean[target].nunique(dropna=True) < 2:
+    if not is_unsupervised and clean[target].nunique(dropna=True) < 2:
         raise ValueError(
             f"Target {target!r} has fewer than two unique values after removing "
             "rows with missing/invalid targets."
         )
 
+    columns_to_check = required if is_unsupervised else features
     all_missing_features = [
-        column for column in features if clean[column].isna().all()
+        column for column in columns_to_check if clean[column].isna().all()
     ]
     if all_missing_features:
         raise ValueError(
@@ -306,7 +346,8 @@ def prepare_dataset(
         "feature_columns": features,
         "rows_before": rows_before,
         "rows_after": int(len(clean)),
-        "rows_dropped_for_missing_target": invalid_target_rows,
+        "rows_dropped_for_missing_target": 0 if is_unsupervised else invalid_target_rows,
+        "missing_values_in_target_placeholder": invalid_target_rows if is_unsupervised else 0,
         "duplicate_rows_detected": duplicate_count,
         "duplicate_rows_removed": duplicates_removed,
         "remove_duplicates_enabled": remove_duplicates,
@@ -315,7 +356,10 @@ def prepare_dataset(
         "missing_values_after": missing_after,
         "constant_features": constant_features,
         "all_missing_features": all_missing_features,
-        "target_unique_values": int(clean[target].nunique(dropna=True)),
+        "target_unique_values": (
+            int(clean[target].nunique(dropna=True)) if not is_unsupervised else None
+        ),
+        "target_is_compatibility_placeholder": bool(is_unsupervised),
         "target_class_counts": (
             {str(k): int(v) for k, v in clean[target].value_counts(dropna=False).items()}
             if problem_type == "classification"
@@ -323,6 +367,7 @@ def prepare_dataset(
         ),
         "notes": [
             "Missing feature values are left for the training pipeline's imputers.",
+            "For unsupervised tasks, target_column is a compatibility placeholder and is treated as an input feature.",
             "Duplicate rows are reported and preserved unless remove_duplicates=True.",
             "This report describes data checks; it does not prove the dataset is unbiased or leakage-free.",
         ],
