@@ -43,8 +43,12 @@ PLANNING RULES
 
 - Select only models supported for the chosen task.
 - Choose 2 to 3 candidate models when reasonable.
-- Do not require a target column for clustering,
-  anomaly detection, or dimensionality reduction.
+- Clustering, anomaly detection, and dimensionality reduction do not use a label.
+- The schema requires target_column for compatibility: for unsupervised tasks,
+  set it to the first available CSV column (or "target" for synthetic data).
+  This column is a placeholder and will also be used as an input feature.
+- For unsupervised tasks, feature_columns should contain the other actual CSV
+  columns; never drop the placeholder column from the training inputs.
 - Use the actual dataset columns when a dataset is provided.
 - Never invent feature or target columns.
 - Do not treat an identifier as a target without justification.
@@ -85,6 +89,51 @@ ALLOWED_MODELS = {
 }
 
 
+def _detect_advanced_task(use_case: str) -> str | None:
+    """Recognize unsupervised tasks for the deterministic fallback planner."""
+    text = use_case.lower().replace("_", " ").replace("-", " ")
+    patterns = {
+        "anomaly_detection": (
+            "anomaly detection", "detect anomalies", "outlier detection",
+            "identify outliers", "isolation forest", "one class svm",
+            "local outlier factor",
+        ),
+        "dimensionality_reduction": (
+            "dimensionality reduction", "reduce dimensions", "reduce dimensionality",
+            "feature reduction", "principal component analysis", "truncated svd",
+        ),
+        "clustering": (
+            "clustering", "cluster analysis", "customer segmentation",
+            "segment customers", "group similar", "k means", "dbscan",
+            "agglomerative clustering",
+        ),
+    }
+    for task_type, phrases in patterns.items():
+        if any(phrase in text for phrase in phrases):
+            return task_type
+    # Handle PCA as a standalone acronym without matching unrelated words.
+    if "pca" in text.split():
+        return "dimensionality_reduction"
+    return None
+
+
+def _advanced_defaults(task_type: str) -> tuple[list[str], str]:
+    defaults = {
+        "clustering": (
+            ["kmeans", "dbscan", "agglomerative_clustering"],
+            "silhouette_score",
+        ),
+        "anomaly_detection": (
+            ["isolation_forest", "local_outlier_factor", "one_class_svm"],
+            "outlier_fraction",
+        ),
+        "dimensionality_reduction": (
+            ["pca", "truncated_svd"], "explained_variance",
+        ),
+    }
+    return defaults[task_type]
+
+
 def create_plan(use_case: str, *, dataset_columns: list[str] | None = None,
                 requested_target: str | None = None) -> MLExperimentPlan:
     if not USE_LLM_PLANNER:
@@ -104,10 +153,43 @@ def create_plan(use_case: str, *, dataset_columns: list[str] | None = None,
         )
         if not isinstance(result, MLExperimentPlan):
             raise TypeError("Planner returned an unexpected response type.")
+
         allowed = ALLOWED_MODELS[result.problem_type]
         models = [m for m in result.candidate_models if m in allowed]
         if not models:
-            models = list(allowed)[:3]
+            models = _advanced_defaults(result.problem_type)[0][:3] if result.problem_type in {
+                "clustering", "anomaly_detection", "dimensionality_reduction"
+            } else list(allowed)[:3]
+
+        is_advanced = result.problem_type in {
+            "clustering", "anomaly_detection", "dimensionality_reduction"
+        }
+        if is_advanced:
+            if dataset_columns is not None:
+                if len(dataset_columns) < 2:
+                    raise ValueError("The dataset must contain at least two columns.")
+                # main.py requires a target column. For unsupervised work this is
+                # only a compatibility placeholder; trainer.py uses every column.
+                target = dataset_columns[0]
+                features = [c for c in dataset_columns if c != target]
+            else:
+                target = result.target_column or "target"
+                features = [c for c in result.feature_columns if c != target]
+                if not features:
+                    features = ["feature_1", "feature_2", "feature_3", "feature_4"]
+            metric = _advanced_defaults(result.problem_type)[1]
+            return result.model_copy(update={
+                "target_column": target,
+                "feature_columns": features,
+                "candidate_models": models[:4],
+                "evaluation_metric": metric,
+                "generate_synthetic_data": dataset_columns is None,
+                "reasoning": (
+                    result.reasoning + " Unsupervised mode: target_column is a compatibility "
+                    "placeholder, and all selected columns are treated as input features."
+                ),
+            })
+
         target = requested_target or result.target_column
         features = result.feature_columns
         if dataset_columns is not None:
@@ -128,14 +210,44 @@ def create_plan(use_case: str, *, dataset_columns: list[str] | None = None,
         print(f"LLM planner unavailable or invalid ({type(exc).__name__}: {exc}). Using fallback planner.")
         return fallback_plan(use_case, dataset_columns, requested_target)
 
+
 def fallback_plan(use_case: str, columns: list[str] | None, target: str | None) -> MLExperimentPlan:
+    advanced_task = _detect_advanced_task(use_case)
+    if advanced_task:
+        models, metric = _advanced_defaults(advanced_task)
+        if columns:
+            if len(columns) < 2:
+                raise ValueError("The dataset must contain at least two columns.")
+            # Compatibility placeholder only; all columns are used by trainer.py.
+            chosen_target = columns[0]
+            features = [c for c in columns if c != chosen_target]
+            synthetic = False
+        else:
+            chosen_target = "target"
+            features = ["feature_1", "feature_2", "feature_3", "feature_4"]
+            synthetic = True
+        return MLExperimentPlan(
+            problem_type=advanced_task,
+            target_column=chosen_target,
+            feature_columns=features,
+            candidate_models=models,
+            evaluation_metric=metric,
+            generate_synthetic_data=synthetic,
+            synthetic_rows=3000,
+            reasoning=(
+                f"Fallback plan for {advanced_task}. This is an unsupervised task; "
+                "target_column is only a compatibility placeholder and all columns "
+                "will be used as input features."
+            ),
+        )
+
     if columns:
         chosen_target = target or columns[-1]
         features = [c for c in columns if c != chosen_target]
 
         if not features:
             raise ValueError("CSV needs at least one feature and one target column.")
-        
+
         return MLExperimentPlan(
             problem_type="classification",
             target_column=chosen_target,
@@ -145,7 +257,7 @@ def fallback_plan(use_case: str, columns: list[str] | None, target: str | None) 
             generate_synthetic_data=False,
             reasoning="Fallback plan: classification is assumed. Verify problem type and target before accepting.",
         )
-    
+
     lowered = use_case.lower()
     regression_words = ("predict price", "forecast", "predict sales", "estimate", "regression", "numeric")
     problem_type = "regression" if any(word in lowered for word in regression_words) else "classification"
@@ -183,7 +295,8 @@ def review_plan_with_data_quality(
         "data_quality_report": quality_report,
         "instructions": [
             "Return a revised MLExperimentPlan only.",
-            "Keep the target column unchanged.",
+            "Keep the problem_type and target column unchanged.",
+            "For unsupervised tasks, target_column is only a compatibility placeholder.",
             "Use only feature columns already present in the report's feature_analysis list.",
             "Do not remove features solely because numeric values are unique.",
             "Treat identifier and leakage checks as warnings, not proof.",
@@ -200,8 +313,10 @@ def review_plan_with_data_quality(
                 + "\nReview the supplied initial plan and data-quality report. "
                 "Make conservative recommendations. Preserve the target column. "
                 "Do not invent dataset columns or claim heuristic warnings prove leakage. "
-                "For classification use accuracy or f1_weighted; for regression use "
-                "rmse, mae, or r2. Return only the requested structured plan."
+                "For classification use accuracy, f1_weighted, or roc_auc; for regression use "
+                "rmse, mae, or r2; for clustering use silhouette_score; for anomaly detection "
+                "use outlier_fraction; for dimensionality reduction use explained_variance. "
+                "Return only the requested structured plan."
             ),
             messages=[{"role": "user", "content": str(context)}],
             response_model=MLExperimentPlan,
@@ -212,6 +327,8 @@ def review_plan_with_data_quality(
 
         if result.target_column != plan.target_column:
             raise ValueError("Plan reviewer attempted to change the target column.")
+        if result.problem_type != plan.problem_type:
+            raise ValueError("Plan reviewer attempted to change the task type.")
 
         available_features = {
             item["column"]
@@ -238,11 +355,13 @@ def review_plan_with_data_quality(
         if not revised_models:
             revised_models = list(plan.candidate_models)
 
-        allowed_metrics = (
-            {"accuracy", "f1_weighted"}
-            if plan.problem_type == "classification"
-            else {"rmse", "mae", "r2"}
-        )
+        allowed_metrics = {
+            "classification": {"accuracy", "f1_weighted", "roc_auc"},
+            "regression": {"rmse", "mae", "r2"},
+            "clustering": {"silhouette_score"},
+            "anomaly_detection": {"outlier_fraction"},
+            "dimensionality_reduction": {"explained_variance"},
+        }[plan.problem_type]
         metric = (
             result.evaluation_metric
             if result.evaluation_metric in allowed_metrics
