@@ -291,12 +291,12 @@
             <div class="form-section"><div class="section-kicker">02 · Dataset</div><h3 class="section-heading">Choose input data</h3><div class="section-description">Upload a CSV for inspection, or let the agent create a synthetic demonstration dataset.</div>
               <div class="choice-row"><label class="choice"><input type="radio" name="sourceType" value="csv" checked/><div><div class="choice-title">Upload CSV</div><div class="choice-copy">Use your own tabular data</div></div></label><label class="choice"><input type="radio" name="sourceType" value="synthetic"/><div><div class="choice-title">Synthetic data</div><div class="choice-copy">Create a demo dataset</div></div></label></div>
               <div id="csvSourceBlock"><div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Upload CSV"><div class="empty-icon"><svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></svg></div><strong>Drop your CSV here or click to browse</strong><span>CSV files only · up to the server's configured upload limit</span><input type="file" id="csvFile" accept=".csv,text/csv" hidden/></div><div id="fileInfo"></div>
-                <div id="columnFields" class="hide"><div class="row"><div class="field"><label for="targetColumn">Target column</label><select id="targetColumn"></select><div class="hint">The value the model should learn to predict.</div></div><div class="field"><label for="taskType">Problem type</label><select id="taskType"><option value="auto">Agent recommends</option><option value="classification">Classification</option><option value="regression">Regression</option></select></div></div>
+                <div id="columnFields" class="hide"><div class="row"><div class="field"><label for="targetColumn">Target column</label><select id="targetColumn"></select><div class="hint">The value the model should learn to predict.</div></div><div class="field"><label for="taskType">Problem type</label><select id="taskType"><option value="auto">Agent recommends</option><option value="classification">Classification</option><option value="regression">Regression</option><option value="clustering">Clustering</option><option value="anomaly_detection">Anomaly detection</option><option value="dimensionality_reduction">Dimensionality reduction</option></select></div></div>
                   <div class="field"><label>Feature columns</label><div class="hint" style="margin-bottom:8px">Select the columns the model is allowed to use. The target cannot be a feature.</div><div id="featuresList" class="features-list"></div></div>
                   <div id="datasetPreview"></div>
                 </div>
               </div>
-              <div id="syntheticBlock" class="hide"><div class="row"><div class="field"><label for="syntheticRows">Number of synthetic rows</label><input class="input" id="syntheticRows" type="number" min="200" max="20000" value="1500"/><div class="hint">Allowed range: 200–20,000.</div></div><div class="field"><label for="syntheticTaskType">Problem type</label><select id="syntheticTaskType"><option value="auto">Agent recommends</option><option value="classification">Classification</option><option value="regression">Regression</option></select></div></div><div class="field"><label for="syntheticTarget">Target name</label><input class="input" id="syntheticTarget" value="target" maxlength="100"/><div class="hint">The agent can propose a name if you change the task later.</div></div><div class="notice warning"><span>⚠</span><span>Synthetic data is useful for testing a pipeline; it does not establish real-world model performance.</span></div></div>
+              <div id="syntheticBlock" class="hide"><div class="row"><div class="field"><label for="syntheticRows">Number of synthetic rows</label><input class="input" id="syntheticRows" type="number" min="200" max="20000" value="1500"/><div class="hint">Allowed range: 200–20,000.</div></div><div class="field"><label for="syntheticTaskType">Problem type</label><select id="syntheticTaskType"><option value="auto">Agent recommends</option><option value="classification">Classification</option><option value="regression">Regression</option><option value="clustering">Clustering</option><option value="anomaly_detection">Anomaly detection</option><option value="dimensionality_reduction">Dimensionality reduction</option></select></div></div><div class="field"><label for="syntheticTarget">Target name</label><input class="input" id="syntheticTarget" value="target" maxlength="100"/><div class="hint">The agent can propose a name if you change the task later.</div></div><div class="notice warning"><span>⚠</span><span>Synthetic data is useful for testing a pipeline; it does not establish real-world model performance.</span></div></div>
             </div>
             <div class="form-section"><div class="section-kicker">03 · Training</div><h3 class="section-heading">Configure execution</h3><div class="section-description">These preferences are sent to the API at the start; the agent plan is still shown for approval.</div>
               <div class="row"><div class="field"><label for="backend">Training environment</label><select id="backend"><option value="local">Local Python (available)</option><option value="colab">Google Colab (available)</option></select><div class="hint">Planning, data preparation, quality checks and approvals run locally; model training runs in Google Colab.</div></div><div class="field"><label for="metric">Evaluation metric</label><select id="metric"><option value="auto">Agent recommends</option><option value="accuracy">Accuracy</option><option value="f1_weighted">Weighted F1</option><option value="rmse">RMSE</option><option value="mae">MAE</option><option value="r2">R²</option></select></div></div>
@@ -357,12 +357,19 @@
   ];
   const modelChoices = {
     classification: ['logistic_regression','random_forest','extra_trees','hist_gradient_boosting'],
-    regression: ['linear_regression','random_forest','extra_trees','hist_gradient_boosting']
+    regression: ['linear_regression','random_forest','extra_trees','hist_gradient_boosting'],
+    clustering: ['kmeans','dbscan','agglomerative_clustering'],
+    anomaly_detection: ['isolation_forest','local_outlier_factor','one_class_svm'],
+    dimensionality_reduction: ['pca','truncated_svd']
   };
   const metricChoices = {
     classification: [['auto','Agent recommends'],['accuracy','Accuracy'],['f1_weighted','Weighted F1']],
-    regression: [['auto','Agent recommends'],['rmse','RMSE'],['mae','MAE'],['r2','R²']]
+    regression: [['auto','Agent recommends'],['rmse','RMSE'],['mae','MAE'],['r2','R²']],
+    clustering: [['auto','Agent recommends'],['silhouette_score','Silhouette score']],
+    anomaly_detection: [['auto','Agent recommends'],['outlier_fraction','Outlier fraction']],
+    dimensionality_reduction: [['auto','Agent recommends'],['explained_variance','Explained variance']]
   };
+  const advancedTasks = new Set(['clustering','anomaly_detection','dimensionality_reduction']);
   const navTitles = { dashboard: ['Overview','Experiment overview'], new: ['New experiment','Create an experiment'], experiments: ['Experiments','Experiments'], run: ['Run details','Experiment run'] };
 
   async function api(path, options = {}) {
@@ -497,8 +504,19 @@
   function renderFeatures() {
     if (!currentDataset) return;
     const target = $('targetColumn').value;
-    $('featuresList').innerHTML = currentDataset.columns.filter(col => col.name !== target).map((column, i) => `<label class="check-card"><input type="checkbox" data-feature="${escapeHtml(column.name)}" checked/><span>${escapeHtml(column.name)} <span class="tiny">· ${escapeHtml(column.dtype)}</span></span></label>`).join('');
+    const advanced = advancedTasks.has(selectedTask());
+    $('featuresList').innerHTML = currentDataset.columns.filter(col => col.name !== target).map((column) => `<label class="check-card"><input type="checkbox" data-feature="${escapeHtml(column.name)}" checked/><span>${escapeHtml(column.name)} <span class="tiny">· ${escapeHtml(column.dtype)}</span></span></label>`).join('');
     $('featuresList').querySelectorAll('input').forEach(el => el.addEventListener('change', updateSummary));
+    const targetLabel = document.querySelector('label[for="targetColumn"]');
+    if (targetLabel) targetLabel.textContent = advanced ? 'Compatibility column (included as input)' : 'Target column';
+    const targetHint = $('targetColumn').parentElement.querySelector('.hint');
+    if (targetHint) targetHint.textContent = advanced
+      ? 'Unsupervised tasks have no label. This selected column is included as an ordinary input feature for compatibility; select other input columns below.'
+      : 'The value the model should learn to predict.';
+    const featureHint = $('featuresList').parentElement.querySelector('.hint');
+    if (featureHint) featureHint.textContent = advanced
+      ? 'Select the other input columns. The compatibility column above is also included automatically.'
+      : 'Select the columns the model is allowed to use. The target cannot be a feature.';
     updateSummary();
   }
   function selectedFeatures() { return Array.from(document.querySelectorAll('[data-feature]:checked')).map(el => el.dataset.feature); }
@@ -512,7 +530,13 @@
     $('summaryDataset').textContent = currentDataset ? `${formatNumber(currentDataset.rows)} rows / ${formatNumber(currentDataset.columns_count)} columns` : (csv ? 'Not uploaded' : `${formatNumber(Number($('syntheticRows').value)||1500)} synthetic rows`);
     $('summaryTarget').textContent = csv ? (currentDataset ? $('targetColumn').value || 'Not selected' : 'Select after upload') : ($('syntheticTarget').value || 'target');
     $('summaryFeatures').textContent = csv ? (currentDataset ? `${selectedFeatures().length} selected` : 'Agent-selected') : 'Agent-selected';
-    $('summaryTask').textContent = selectedTask() === 'auto' ? 'Agent recommends' : selectedTask();
+    $('summaryTask').textContent = selectedTask() === 'auto' ? 'Agent recommends' : selectedTask().replaceAll('_', ' '); 
+    const syntheticTargetLabel = document.querySelector('label[for="syntheticTarget"]');
+    const syntheticTargetHint = $('syntheticTarget').parentElement.querySelector('.hint');
+    if (syntheticTargetLabel) syntheticTargetLabel.textContent = advancedTasks.has(selectedTask()) ? 'Compatibility feature name' : 'Target name';
+    if (syntheticTargetHint) syntheticTargetHint.textContent = advancedTasks.has(selectedTask())
+      ? 'Unsupervised workflows have no target label; this name identifies one generated input feature.'
+      : 'The agent can propose a name if you change the task later.';
     $('summaryBackend').textContent = $('backend').value === 'local' ? 'Local Python' : 'Google Colab';
     $('summaryAugmentation').textContent = $('augmentEnabled').checked ? `${formatNumber(Number($('additionalRows').value)||0)} extra rows` : 'Off';
   }
@@ -525,11 +549,13 @@
   }
   function renderMetricOptions() {
     const metric = $('metric'), task = selectedTask(); const previous = metric.value;
-    const opts = task === 'auto' ? [['auto','Agent recommends'],['accuracy','Accuracy'],['f1_weighted','Weighted F1'],['rmse','RMSE'],['mae','MAE'],['r2','R²']] : metricChoices[task];
+    const opts = task === 'auto'
+      ? [['auto','Agent recommends'],['accuracy','Accuracy'],['f1_weighted','Weighted F1'],['rmse','RMSE'],['mae','MAE'],['r2','R²'],['silhouette_score','Silhouette score'],['outlier_fraction','Outlier fraction'],['explained_variance','Explained variance']]
+      : metricChoices[task];
     metric.innerHTML = opts.map(([value,label]) => `<option value="${value}">${label}</option>`).join('');
     if (opts.some(([value]) => value === previous)) metric.value = previous; else metric.value = 'auto';
   }
-  $('taskType').addEventListener('change', () => { renderModelOptions(); renderMetricOptions(); updateSummary(); });
+  $('taskType').addEventListener('change', () => { renderModelOptions(); renderMetricOptions(); renderFeatures(); updateSummary(); });
   $('syntheticTaskType').addEventListener('change', () => { renderModelOptions(); renderMetricOptions(); updateSummary(); });
   renderModelOptions(); renderMetricOptions();
   $('resetForm').addEventListener('click', async () => {
@@ -743,7 +769,7 @@
     const metric = result.test_metric || result.selection_metric || 'Score';
     $('runStatCards').innerHTML = [
       ['Rows used', formatNumber(result.rows_used), 'Prepared rows'],
-      ['Target', result.target_column || '—', result.problem_type || 'Task'],
+      [advancedTasks.has(result.problem_type) ? 'Input placeholder' : 'Target', result.target_column || result.target_placeholder_column || (advancedTasks.has(result.problem_type) ? 'Not applicable' : '—'), result.problem_type || 'Task'],
       ['Best model', result.best_model || '—', 'Selected on validation score'],
       ['Held-out test', score == null ? '—' : formatNumber(score), metric.toUpperCase()]
     ].map(([label,value,foot]) => `<div class="result-metric"><div class="result-label">${escapeHtml(label)}</div><div class="result-value">${escapeHtml(value)}</div><div class="result-foot">${escapeHtml(foot)}</div></div>`).join('');
@@ -763,6 +789,23 @@
   }
   function renderMetricsTable(result) {
     const experiments = result.experiments || [];
+    if (advancedTasks.has(result.problem_type)) {
+      const best = result.best_model || '—';
+      const summaryCards = [
+        ['Selected model', best, 'Default candidate for this unsupervised task'],
+        ['Rows processed', formatNumber(result.rows_used), 'Rows passed to the trainer'],
+        ['Candidates completed', experiments.length, 'Successful candidate runs'],
+        ['Task', result.problem_type.replaceAll('_', ' '), 'No target-based test score']
+      ].map(([label,value,foot]) => `<div class="result-metric"><div class="result-label">${escapeHtml(label)}</div><div class="result-value">${escapeHtml(value)}</div><div class="result-foot">${escapeHtml(foot)}</div></div>`).join('');
+      const rows = experiments.map(item => {
+        const metricText = Object.entries(item.metrics || {}).map(([key, value]) => `${key.replaceAll('_',' ')}: ${value == null ? '—' : (typeof value === 'number' ? formatNumber(value) : Array.isArray(value) ? value.map(formatNumber).join(', ') : String(value))}`).join(' · ') || 'No scalar metrics reported';
+        const score = item.selection_score == null ? 'Not ranked' : formatNumber(item.selection_score);
+        const artifact = item.artifact ? `<a href="${escapeHtml('/api/experiments/'+currentRunId+'/artifacts/models/'+String(item.artifact).split(/[\\/]/).slice(-1)[0])}" target="_blank" rel="noopener">Model file</a>` : '—';
+        return `<tr><td><strong>${escapeHtml(item.model)}</strong>${item.model === best ? '<div class="tiny" style="color:#16845b">Selected</div>' : ''}</td><td>${escapeHtml(metricText)}</td><td>${escapeHtml(score)}</td><td>${escapeHtml(formatNumber(item.duration_seconds))} s</td><td>${artifact}</td></tr>`;
+      }).join('');
+      $('metricsOutput').innerHTML = `<div class="grid result-grid">${summaryCards}</div><div class="card"><div class="card-head"><div><h3 class="card-title">Unsupervised model results</h3><div class="card-sub">Task-specific diagnostics are shown below. These are not supervised validation or held-out test scores.</div></div><span class="badge succeeded">${experiments.length} result(s)</span></div><div class="table-wrap"><table><thead><tr><th>Model</th><th>Task metrics</th><th>Selection score</th><th>Duration</th><th>Artifact</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No candidate metrics returned.</td></tr>'}</tbody></table></div>${result.selection_note ? `<div class="notice info" style="margin-top:14px"><span>ⓘ</span><span>${escapeHtml(result.selection_note)}</span></div>` : ''}${(result.errors || []).length ? `<div class="notice warning" style="margin-top:14px"><span>!</span><span><strong>Some candidates failed.</strong><br/>${result.errors.map(e => `${escapeHtml(e.model)}: ${escapeHtml(e.error)}`).join('<br/>')}</span></div>` : ''}<div class="notice info"><span>ⓘ</span><span>Download row-level outputs from the Artifacts tab: cluster assignments, anomaly labels/scores, or reduced feature coordinates.</span></div></div>`;
+      return;
+    }
     const summaryCards = [
       ['Best model', result.best_model || '—', 'Best validation result'],
       ['Validation score', formatNumber(result.best_validation_score), result.selection_metric || 'Selection metric'],
@@ -781,9 +824,12 @@
       const warnings = data.warnings || [];
       const chartCards = charts.map(chart => `<article class="studio-chart"><h3>${escapeHtml(chart.title)}</h3><p>${escapeHtml(chart.description || '')}</p><a href="${escapeHtml(chart.url)}" target="_blank" rel="noopener"><img loading="lazy" src="${escapeHtml(chart.url)}?v=${encodeURIComponent(currentRunId)}" alt="${escapeHtml(chart.title)}"/></a><div class="tiny" style="margin-top:8px"><a href="${escapeHtml(chart.url)}" download>Download chart</a></div></article>`).join('');
       const best = result.best_model || 'Best model';
-      const score = result.held_out_test_score == null ? '—' : formatNumber(result.held_out_test_score);
-      const metric = result.test_metric || result.selection_metric || 'metric';
-      slot.innerHTML = `<div class="studio-hero"><div><div class="studio-kicker">Model Studio · Experiment ${escapeHtml(currentRunId)}</div><h3>${escapeHtml(best.replaceAll('_',' '))}</h3><p>Insights generated from the saved model, candidate metrics and prepared run data.</p></div><div><div class="studio-kicker">Held-out test · ${escapeHtml(metric.toUpperCase())}</div><h3>${escapeHtml(score)}</h3></div></div><div class="grid result-grid" style="margin-top:14px">${[['Task',result.problem_type || '—'],['Target',result.target_column || '—'],['Features',(result.features || []).length],['Rows used',formatNumber(result.rows_used)]].map(([label,value])=>`<div class="result-metric"><div class="result-label">${escapeHtml(label)}</div><div class="result-value">${escapeHtml(value)}</div><div class="result-foot">Experiment result</div></div>`).join('')}</div><div class="card" style="margin-top:14px"><div class="card-head"><div><h3 class="card-title">Generated insights</h3><div class="card-sub">Plots are saved in this run's <code>graphs/</code> folder and can be downloaded.</div></div><span class="badge ${charts.length ? 'succeeded' : 'awaiting_approval'}">${charts.length} chart(s)</span></div>${chartCards ? `<div class="studio-grid">${chartCards}</div>` : '<div class="empty">No charts were generated for this run yet.</div>'}${warnings.map(w=>`<div class="notice warning"><span>!</span><span>${escapeHtml(w)}</span></div>`).join('')}<div class="notice info"><span>ⓘ</span><span>Feature insights are based on model-native importances or coefficient magnitudes when available. Classification confusion matrices and regression diagnostics use the held-out split.</span></div></div>`;
+      const advanced = advancedTasks.has(result.problem_type);
+      const bestExperiment = (result.experiments || []).find(item => item.model === result.best_model);
+      const advancedMetricSummary = Object.entries(bestExperiment?.metrics || {}).map(([key, value]) => `${key.replaceAll('_',' ')}: ${Array.isArray(value) ? value.map(formatNumber).join(', ') : (typeof value === 'number' ? formatNumber(value) : String(value))}`).join(' · ');
+      const score = advanced ? (advancedMetricSummary || result.selection_note || 'Unsupervised result') : (result.held_out_test_score == null ? '—' : formatNumber(result.held_out_test_score));
+      const metric = advanced ? 'Task summary' : (result.test_metric || result.selection_metric || 'metric');
+      slot.innerHTML = `<div class="studio-hero"><div><div class="studio-kicker">Model Studio · Experiment ${escapeHtml(currentRunId)}</div><h3>${escapeHtml(best.replaceAll('_',' '))}</h3><p>Insights generated from the saved model, candidate metrics and prepared run data.</p></div><div><div class="studio-kicker">${advanced ? 'Unsupervised · ' : 'Held-out test · '}${escapeHtml(metric.toUpperCase())}</div><h3>${escapeHtml(score)}</h3></div></div><div class="grid result-grid" style="margin-top:14px">${[['Task',result.problem_type || '—'],[advanced ? 'Input placeholder' : 'Target',result.target_column || result.target_placeholder_column || (advanced ? 'Not applicable' : '—')],['Features',(result.features || []).length],['Rows used',formatNumber(result.rows_used)]].map(([label,value])=>`<div class="result-metric"><div class="result-label">${escapeHtml(label)}</div><div class="result-value">${escapeHtml(value)}</div><div class="result-foot">Experiment result</div></div>`).join('')}</div><div class="card" style="margin-top:14px"><div class="card-head"><div><h3 class="card-title">Generated insights</h3><div class="card-sub">Plots are saved in this run's <code>graphs/</code> folder and can be downloaded.</div></div><span class="badge ${charts.length ? 'succeeded' : 'awaiting_approval'}">${charts.length} chart(s)</span></div>${chartCards ? `<div class="studio-grid">${chartCards}</div>` : '<div class="empty">No charts were generated for this run yet.</div>'}${warnings.map(w=>`<div class="notice warning"><span>!</span><span>${escapeHtml(w)}</span></div>`).join('')}<div class="notice info"><span>ⓘ</span><span>For supervised tasks, feature insights use model-native importances and held-out diagnostics. For unsupervised tasks, charts summarize cluster assignments, anomaly scores, or reduced feature coordinates; they are not accuracy estimates.</span></div></div>`;
     } catch (error) {
       if (error.status === 409) slot.innerHTML = '<div class="empty"><div class="empty-icon">✦</div><strong>Model Studio is not ready yet</strong>Charts become available after training and artifact generation complete.</div>';
       else slot.innerHTML = `<div class="notice warning"><span>!</span><span>Could not load Model Studio: ${escapeHtml(error.message || 'Unknown error')}</span></div>`;

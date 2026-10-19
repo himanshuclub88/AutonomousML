@@ -73,6 +73,22 @@ DEFAULT_APPROVAL_TIMEOUT_MINUTES = 120
 ALLOWED_METRICS = {
     "classification": {"accuracy", "f1_weighted"},
     "regression": {"rmse", "mae", "r2"},
+    "clustering": {"silhouette_score"},
+    "anomaly_detection": {"outlier_fraction"},
+    "dimensionality_reduction": {"explained_variance"},
+}
+
+ADVANCED_PROBLEM_TYPES = {
+    "clustering",
+    "anomaly_detection",
+    "dimensionality_reduction",
+}
+DEFAULT_METRICS = {
+    "classification": "f1_weighted",
+    "regression": "rmse",
+    "clustering": "silhouette_score",
+    "anomaly_detection": "outlier_fraction",
+    "dimensionality_reduction": "explained_variance",
 }
 
 DEFAULT_CORS_ORIGINS = [
@@ -119,10 +135,10 @@ class ExperimentCreateRequest(BaseModel):
     backend: Literal["local", "colab"] = Field(default="local")
     dataset_id: str | None = Field(default=None, description="ID returned by POST /api/datasets/inspect")
     target_column: str | None = Field(default=None, description="Optional requested target column")
-    problem_type: Literal["classification", "regression"] | None = None
+    problem_type: Literal["classification", "regression", "clustering", "anomaly_detection", "dimensionality_reduction"] | None = None
     candidate_models: list[str] | None = Field(default=None, min_length=1, max_length=4)
     feature_columns: list[str] | None = Field(default=None, min_length=1, description="Optional feature selection; defaults to the agent plan")
-    evaluation_metric: Literal["accuracy", "f1_weighted", "rmse", "mae", "r2"] | None = None
+    evaluation_metric: Literal["accuracy", "f1_weighted", "rmse", "mae", "r2", "silhouette_score", "outlier_fraction", "explained_variance"] | None = None
     synthetic_rows: int = Field(default=1500, ge=200, le=20000)
     additional_rows: int = Field(default=0, ge=0, le=100000, description="Number of extra LLM-generated rows to append to an uploaded CSV")
     batch_size: int = Field(default=200, ge=1, le=2000)
@@ -477,6 +493,84 @@ def _generate_model_studio(job: "ExperimentJob", result: dict[str, Any]) -> dict
         generated.append({"id": filename, "title": title, "description": description,
                           "url": f"/api/experiments/{job.run_id}/artifacts/graphs/{filename}"})
 
+    problem_type = result.get("problem_type")
+
+    # Advanced workflows are unsupervised: they do not have held-out labels or
+    # supervised validation scores. Generate charts from the saved task outputs
+    # instead of trying to run classification/regression diagnostics.
+    if problem_type in ADVANCED_PROBLEM_TYPES:
+        try:
+            experiments = result.get("experiments") or []
+            scored = [
+                item for item in experiments
+                if item.get("selection_score") is not None
+            ]
+            if scored:
+                ordered = sorted(scored, key=lambda item: float(item["selection_score"]), reverse=True)
+                names = [str(item.get("model", "model")) for item in ordered]
+                scores = [float(item["selection_score"]) for item in ordered]
+                fig, ax = plt.subplots(figsize=(9, max(3.4, 0.55 * len(names))))
+                bars = ax.barh(names[::-1], scores[::-1])
+                ax.set_title("Candidate comparison · unsupervised score")
+                ax.set_xlabel(str(result.get("selection_metric", "selection score")).replace("_", " ").title())
+                ax.grid(axis="x", alpha=.22)
+                for bar, value in zip(bars, scores[::-1]):
+                    ax.text(bar.get_width(), bar.get_y() + bar.get_height()/2, f" {value:.4g}", va="center", fontsize=9)
+                save(fig, "candidate_comparison.png", "Candidate comparison", "Comparable unsupervised scores reported by the trainer; these are not ground-truth predictive accuracy.")
+
+            best_model = str(result.get("best_model") or "")
+            output_paths = [Path(p) for p in (result.get("outputs") or [])]
+            preferred = []
+            if problem_type == "clustering":
+                preferred = [p for p in output_paths if p.name == f"{best_model}_assignments.csv"]
+            elif problem_type == "anomaly_detection":
+                preferred = [p for p in output_paths if p.name == f"{best_model}_anomalies.csv"]
+            else:
+                preferred = [p for p in output_paths if p.name == f"{best_model}_reduced_features.csv"]
+            output_path = next((p for p in preferred if p.is_file()), None)
+
+            if output_path and problem_type == "clustering":
+                output_frame = pd.read_csv(output_path)
+                prepared_path = job.run_dir / "prepared_training_data.csv"
+                if prepared_path.is_file() and "cluster" in output_frame:
+                    source = pd.read_csv(prepared_path)
+                    numeric = source.select_dtypes(include=["number", "bool"]).columns.tolist()
+                    if len(numeric) >= 2 and len(source) == len(output_frame):
+                        fig, ax = plt.subplots(figsize=(7, 5.5))
+                        scatter = ax.scatter(source[numeric[0]], source[numeric[1]], c=output_frame["cluster"], s=22, alpha=.72)
+                        ax.set_xlabel(numeric[0]); ax.set_ylabel(numeric[1])
+                        ax.set_title(f"Cluster assignments · {best_model.replace('_', ' ')}")
+                        ax.grid(alpha=.18)
+                        save(fig, "cluster_assignments.png", "Cluster assignments", "Rows are colored by the selected model's cluster labels; DBSCAN noise points use label -1.")
+            elif output_path and problem_type == "anomaly_detection":
+                output_frame = pd.read_csv(output_path)
+                if "anomaly_score" in output_frame:
+                    scores = pd.to_numeric(output_frame["anomaly_score"], errors="coerce").dropna()
+                    if not scores.empty:
+                        fig, ax = plt.subplots(figsize=(7, 4.5))
+                        ax.hist(scores, bins=min(40, max(10, int(np.sqrt(len(scores))))))
+                        ax.set_xlabel("Anomaly score (higher means more anomalous)")
+                        ax.set_ylabel("Observations")
+                        ax.set_title(f"Anomaly score distribution · {best_model.replace('_', ' ')}")
+                        ax.grid(axis="y", alpha=.18)
+                        save(fig, "anomaly_score_distribution.png", "Anomaly score distribution", "Distribution of scores emitted by the selected anomaly detector.")
+            elif output_path and problem_type == "dimensionality_reduction":
+                output_frame = pd.read_csv(output_path)
+                components = [column for column in output_frame.columns if str(column).startswith("component_")]
+                if len(components) >= 2:
+                    fig, ax = plt.subplots(figsize=(7, 5.5))
+                    ax.scatter(output_frame[components[0]], output_frame[components[1]], s=22, alpha=.7)
+                    ax.set_xlabel(components[0]); ax.set_ylabel(components[1])
+                    ax.set_title(f"Reduced feature space · {best_model.replace('_', ' ')}")
+                    ax.grid(alpha=.18)
+                    save(fig, "reduced_feature_space.png", "Reduced feature space", "Rows projected into the first two components returned by the selected dimensionality-reduction model.")
+        except Exception as exc:
+            warnings.append(f"Advanced-task charts could not be generated: {type(exc).__name__}: {exc}")
+
+        payload = {"run_id": job.run_id, "generated": generated, "warnings": warnings}
+        _atomic_json(graph_dir / "index.json", payload)
+        return payload
+
     # Candidate comparison: values are the trainer's actual validation scores.
     try:
         experiments = result.get("experiments") or []
@@ -687,6 +781,12 @@ def _apply_request_preferences(
         problem_type = "regression"
     elif request.evaluation_metric in {"accuracy", "f1_weighted"}:
         problem_type = "classification"
+    elif request.evaluation_metric == "silhouette_score":
+        problem_type = "clustering"
+    elif request.evaluation_metric == "outlier_fraction":
+        problem_type = "anomaly_detection"
+    elif request.evaluation_metric == "explained_variance":
+        problem_type = "dimensionality_reduction"
     else:
         problem_type = original_problem_type
     allowed = ALLOWED_MODELS[problem_type]
@@ -708,7 +808,7 @@ def _apply_request_preferences(
                 f"Metric {metric!r} is incompatible with {problem_type}. "
                 f"Choose one of: {sorted(ALLOWED_METRICS[problem_type])}."
             )
-        metric = "f1_weighted" if problem_type == "classification" else "rmse"
+        metric = DEFAULT_METRICS[problem_type]
 
     data["problem_type"] = problem_type
     data["candidate_models"] = candidates
@@ -1237,7 +1337,13 @@ def capabilities() -> dict[str, Any]:
             {"id": "local", "label": "Local Python", "available": True},
             {"id": "colab", "label": "Google Colab", "available": True, "reason": None},
         ],
-        "problem_types": ["classification", "regression"],
+        "problem_types": [
+            "classification",
+            "regression",
+            "clustering",
+            "anomaly_detection",
+            "dimensionality_reduction",
+        ],
         "models": {key: sorted(values) for key, values in ALLOWED_MODELS.items()},
         "metrics": {key: sorted(values) for key, values in ALLOWED_METRICS.items()},
         "approval_stages": [
