@@ -18,10 +18,36 @@ If a dataset is provided, respect its actual target and feature columns. Never a
 Return only the requested structured plan.
 '''
 
+
 ALLOWED_MODELS = {
-    "classification": {"logistic_regression", "random_forest", "extra_trees", "hist_gradient_boosting"},
-    "regression": {"linear_regression", "random_forest", "extra_trees", "hist_gradient_boosting"},
+    "classification": {
+        "logistic_regression",
+        "random_forest",
+        "extra_trees",
+        "hist_gradient_boosting",
+    },
+    "regression": {
+        "linear_regression",
+        "random_forest",
+        "extra_trees",
+        "hist_gradient_boosting",
+    },
+    "clustering": {
+        "kmeans",
+        "dbscan",
+        "agglomerative_clustering",
+    },
+    "anomaly_detection": {
+        "isolation_forest",
+        "local_outlier_factor",
+        "one_class_svm",
+    },
+    "dimensionality_reduction": {
+        "pca",
+        "truncated_svd",
+    },
 }
+
 
 def create_plan(use_case: str, *, dataset_columns: list[str] | None = None,
                 requested_target: str | None = None) -> MLExperimentPlan:
