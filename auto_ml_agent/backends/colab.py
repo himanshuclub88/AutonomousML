@@ -1,4 +1,4 @@
-"""Google Colab runtime adapter for tabular scikit-learn training.
+"""Google Colab runtime adapter for supervised and unsupervised scikit-learn training.
 
 The local application performs planning, data preparation and review. This module
 sends only the prepared training frame to an already-created Colab runtime,
@@ -197,15 +197,11 @@ def _get_runtime_connection() -> tuple[str, str]:
 def _remote_training_script(csv_b64: str, target: str, features: list[str], problem_type: str,
                             candidates: list[str], metric: str, workers: int) -> str:
     config = {
-        "csv_b64": csv_b64,
-        "target": target,
-        "features": features,
-        "problem_type": problem_type,
-        "candidates": candidates,
-        "metric": metric,
-        "workers": workers,
+        "csv_b64": csv_b64, "target": target, "features": features,
+        "problem_type": problem_type, "candidates": candidates,
+        "metric": metric, "workers": workers,
     }
-    return r"""import base64, json, os, time, zipfile, tempfile, traceback
+    return r"""import base64, json, time, zipfile, traceback
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
@@ -216,10 +212,15 @@ from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.metrics import accuracy_score, f1_score, mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import accuracy_score, f1_score, mean_absolute_error, mean_squared_error, r2_score, silhouette_score
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, HistGradientBoostingClassifier
 from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor, HistGradientBoostingRegressor
+from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
+from sklearn.ensemble import IsolationForest
+from sklearn.neighbors import LocalOutlierFactor
+from sklearn.svm import OneClassSVM
+from sklearn.decomposition import PCA, TruncatedSVD
 
 CFG = json.loads(__CONFIG_JSON__)
 OUT = Path('/content/automl_agent_output')
@@ -232,98 +233,264 @@ try:
     frame = pd.read_csv(input_path)
     target, features = CFG['target'], CFG['features']
     problem_type, candidates, metric = CFG['problem_type'], CFG['candidates'], CFG['metric']
-    missing = [c for c in features + [target] if c not in frame.columns]
+    missing = [c for c in list(features) + [target] if c not in frame.columns]
     if missing:
         raise ValueError('Missing required columns: ' + repr(missing))
-    frame = frame[features + [target]].dropna(subset=[target]).copy()
-    if len(frame) < 30:
-        raise ValueError('Need at least 30 usable rows for training.')
 
-    X, y = frame[features], frame[target]
-    stratify = y if problem_type == 'classification' and y.nunique() > 1 and y.value_counts().min() >= 3 else None
-    X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.30, random_state=42, stratify=stratify)
-    stratify_temp = y_temp if problem_type == 'classification' and y_temp.nunique() > 1 and y_temp.value_counts().min() >= 2 else None
-    X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.50, random_state=42, stratify=stratify_temp)
+    if problem_type in {'clustering', 'anomaly_detection', 'dimensionality_reduction'}:
+        # Current CLI compatibility: target is included as an ordinary feature, not used as a label.
+        input_columns = list(dict.fromkeys(list(features) + [target]))
+        X = frame[input_columns].copy()
+        if len(X) < 3:
+            raise ValueError('At least three rows are required for unsupervised training.')
 
-    def estimator(name):
-        if problem_type == 'classification':
-            models = {
-                'logistic_regression': LogisticRegression(max_iter=1000),
-                'random_forest': RandomForestClassifier(n_estimators=150, random_state=42, n_jobs=1),
-                'extra_trees': ExtraTreesClassifier(n_estimators=150, random_state=42, n_jobs=1),
-                'hist_gradient_boosting': HistGradientBoostingClassifier(random_state=42),
-            }
-        elif problem_type == 'regression':
-            models = {
-                'linear_regression': LinearRegression(),
-                'random_forest': RandomForestRegressor(n_estimators=150, random_state=42, n_jobs=1),
-                'extra_trees': ExtraTreesRegressor(n_estimators=150, random_state=42, n_jobs=1),
-                'hist_gradient_boosting': HistGradientBoostingRegressor(random_state=42),
-            }
+        def make_preprocessor(data):
+            numeric = data.select_dtypes(include=['number', 'bool']).columns.tolist()
+            categorical = [c for c in data.columns if c not in numeric]
+            transformers = []
+            if numeric:
+                transformers.append(('numeric', Pipeline([
+                    ('imputer', SimpleImputer(strategy='median')),
+                    ('scaler', StandardScaler()),
+                ]), numeric))
+            if categorical:
+                transformers.append(('categorical', Pipeline([
+                    ('imputer', SimpleImputer(strategy='most_frequent')),
+                    ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False)),
+                ]), categorical))
+            if not transformers:
+                raise ValueError('No usable input features were provided.')
+            return ColumnTransformer(transformers=transformers, remainder='drop')
+
+        results, errors, outputs = [], [], {}
+        for name in candidates:
+            started = time.time()
+            try:
+                prep = make_preprocessor(X)
+                ready = np.asarray(prep.fit_transform(X), dtype=float)
+                if ready.ndim != 2 or ready.shape[1] == 0 or not np.isfinite(ready).all():
+                    raise ValueError('Preprocessing produced invalid feature values.')
+
+                if problem_type == 'clustering':
+                    count = min(3, max(2, ready.shape[1]))
+                    models = {
+                        'kmeans': KMeans(n_clusters=count, n_init=10, random_state=42),
+                        'dbscan': DBSCAN(eps=0.8, min_samples=5),
+                        'agglomerative_clustering': AgglomerativeClustering(n_clusters=count),
+                    }
+                elif problem_type == 'anomaly_detection':
+                    models = {
+                        'isolation_forest': IsolationForest(contamination='auto', random_state=42),
+                        'local_outlier_factor': LocalOutlierFactor(
+                            n_neighbors=min(20, max(2, len(X) - 1)), contamination='auto'
+                        ),
+                        'one_class_svm': OneClassSVM(kernel='rbf', gamma='scale', nu=0.05),
+                    }
+                else:
+                    components = max(1, min(2, ready.shape[1], len(X) - 1))
+                    models = {
+                        'pca': PCA(n_components=components, random_state=42),
+                        'truncated_svd': TruncatedSVD(n_components=components, random_state=42),
+                    }
+                if name not in models:
+                    raise ValueError('Model ' + repr(name) + ' is not supported for ' + problem_type)
+                model = models[name]
+                details, selection_score = {}, None
+
+                if problem_type == 'clustering':
+                    labels = model.fit_predict(ready)
+                    unique_labels = set(labels.tolist())
+                    mask = np.asarray(labels) != -1 if name == 'dbscan' else np.ones(len(labels), dtype=bool)
+                    scored_labels = np.asarray(labels)[mask]
+                    score = None
+                    if len(set(scored_labels.tolist())) >= 2 and int(mask.sum()) > len(set(scored_labels.tolist())):
+                        score = float(silhouette_score(ready[mask], scored_labels))
+                    details = {
+                        'cluster_count': int(len(unique_labels - {-1}) if name == 'dbscan' else len(unique_labels)),
+                        'noise_points': int(np.sum(np.asarray(labels) == -1)) if name == 'dbscan' else 0,
+                        'silhouette_score': score,
+                    }
+                    outputs[name] = pd.DataFrame({'row_index': frame.index, 'cluster': labels})
+                    selection_score = score
+
+                elif problem_type == 'anomaly_detection':
+                    if name == 'local_outlier_factor':
+                        labels = model.fit_predict(ready)
+                        scores = -model.negative_outlier_factor_
+                    else:
+                        model.fit(ready)
+                        labels = model.predict(ready)
+                        scores = -model.decision_function(ready) if hasattr(model, 'decision_function') else -model.score_samples(ready)
+                    anomaly = np.asarray(labels) == -1
+                    details = {
+                        'anomaly_count': int(anomaly.sum()),
+                        'outlier_fraction': float(anomaly.mean()),
+                        'score_direction': 'higher values indicate more anomalous observations',
+                    }
+                    out_frame = frame.copy()
+                    out_frame['anomaly_label'] = np.where(anomaly, 'anomaly', 'normal')
+                    out_frame['anomaly_score'] = np.asarray(scores, dtype=float)
+                    outputs[name] = out_frame
+
+                else:
+                    reduced = np.asarray(model.fit_transform(ready), dtype=float)
+                    details = {'n_components': int(reduced.shape[1])}
+                    if hasattr(model, 'explained_variance_ratio_'):
+                        variance = np.asarray(model.explained_variance_ratio_, dtype=float)
+                        details['explained_variance_ratio'] = variance.tolist()
+                        details['total_explained_variance'] = float(variance.sum())
+                        selection_score = float(variance.sum())
+                    outputs[name] = pd.DataFrame(
+                        reduced,
+                        columns=[f'component_{i + 1}' for i in range(reduced.shape[1])],
+                        index=frame.index,
+                    )
+
+                artifact = OUT / (name + '.joblib')
+                joblib.dump({
+                    'task_type': problem_type, 'model_name': name,
+                    'input_columns': input_columns, 'preprocessor': prep, 'model': model,
+                }, artifact)
+                results.append({
+                    'model': name, 'task_type': problem_type, 'metrics': details,
+                    'selection_score': selection_score,
+                    'duration_seconds': round(time.time() - started, 2),
+                    'artifact': str(artifact),
+                })
+            except Exception as exc:
+                errors.append({'model': name, 'error': type(exc).__name__ + ': ' + str(exc)})
+
+        if not results:
+            raise RuntimeError('All advanced experiments failed: ' + repr(errors))
+        for name, out_frame in outputs.items():
+            if problem_type == 'clustering':
+                out_frame.to_csv(OUT / (name + '_assignments.csv'), index=False)
+            elif problem_type == 'anomaly_detection':
+                out_frame.to_csv(OUT / (name + '_anomalies.csv'), index=False)
+            else:
+                out_frame.to_csv(OUT / (name + '_reduced_features.csv'), index=True)
+
+        scored = [item for item in results if item['selection_score'] is not None]
+        if scored and problem_type in {'clustering', 'dimensionality_reduction'}:
+            best = max(scored, key=lambda item: item['selection_score'])
+            selection_note = 'Selected using the available unsupervised score; interpret cautiously.'
         else:
-            raise ValueError('Unsupported problem type: ' + str(problem_type))
-        if name not in models:
-            raise ValueError('Model ' + repr(name) + ' is not supported for ' + problem_type)
-        return models[name]
+            best = results[0]
+            selection_note = 'No reliable ground-truth ranking is available; first successful candidate is the default.'
+        best_path = OUT / 'best_model.joblib'
+        best_path.write_bytes(Path(best['artifact']).read_bytes())
+        metrics = {
+            'problem_type': problem_type, 'target_column': None,
+            'target_placeholder_column': target, 'features': input_columns,
+            'selection_metric': metric, 'best_model': best['model'],
+            'selection_note': selection_note,
+            'experiments': sorted(results, key=lambda item: item['duration_seconds']),
+            'errors': errors, 'best_model_path': str(best_path),
+            'rows_used': int(len(X)), 'outputs': [str(p) for p in sorted(OUT.glob('*_*.csv'))],
+            'training_backend': 'google_colab',
+        }
+        (OUT / 'metrics.json').write_text(json.dumps(metrics, indent=2), encoding='utf-8')
 
-    def pipeline(X_frame, model):
-        numeric = X_frame.select_dtypes(include=['number', 'bool']).columns.tolist()
-        categorical = [c for c in X_frame.columns if c not in numeric]
-        transformers = []
-        if numeric:
-            transformers.append(('numeric', Pipeline([('imputer', SimpleImputer(strategy='median')), ('scaler', StandardScaler())]), numeric))
-        if categorical:
-            transformers.append(('categorical', Pipeline([('imputer', SimpleImputer(strategy='most_frequent')), ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))]), categorical))
-        return Pipeline([('preprocess', ColumnTransformer(transformers=transformers, remainder='drop')), ('model', model)])
+    else:
+        # Existing supervised workflow retained.
+        frame = frame[list(features) + [target]].dropna(subset=[target]).copy()
+        if len(frame) < 30:
+            raise ValueError('Need at least 30 usable rows for training.')
+        X, y = frame[features], frame[target]
+        stratify = y if problem_type == 'classification' and y.nunique() > 1 and y.value_counts().min() >= 3 else None
+        X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.30, random_state=42, stratify=stratify)
+        stratify_temp = y_temp if problem_type == 'classification' and y_temp.nunique() > 1 and y_temp.value_counts().min() >= 2 else None
+        X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.50, random_state=42, stratify=stratify_temp)
 
-    def score(y_true, y_pred):
-        if problem_type == 'regression':
-            if metric == 'mae': return float(mean_absolute_error(y_true, y_pred))
-            if metric == 'r2': return float(r2_score(y_true, y_pred))
-            return float(np.sqrt(mean_squared_error(y_true, y_pred)))
-        if metric == 'accuracy': return float(accuracy_score(y_true, y_pred))
-        return float(f1_score(y_true, y_pred, average='weighted', zero_division=0))
+        def estimator(name):
+            if problem_type == 'classification':
+                models = {
+                    'logistic_regression': LogisticRegression(max_iter=1000),
+                    'random_forest': RandomForestClassifier(n_estimators=150, random_state=42, n_jobs=1),
+                    'extra_trees': ExtraTreesClassifier(n_estimators=150, random_state=42, n_jobs=1),
+                    'hist_gradient_boosting': HistGradientBoostingClassifier(random_state=42),
+                }
+            elif problem_type == 'regression':
+                models = {
+                    'linear_regression': LinearRegression(),
+                    'random_forest': RandomForestRegressor(n_estimators=150, random_state=42, n_jobs=1),
+                    'extra_trees': ExtraTreesRegressor(n_estimators=150, random_state=42, n_jobs=1),
+                    'hist_gradient_boosting': HistGradientBoostingRegressor(random_state=42),
+                }
+            else:
+                raise ValueError('Unsupported problem type: ' + str(problem_type))
+            if name not in models:
+                raise ValueError('Model ' + repr(name) + ' is not supported for ' + problem_type)
+            return models[name]
 
-    def better(a, b):
-        if problem_type == 'regression' and metric in ('rmse', 'mae'): return a < b
-        return a > b
+        def pipeline(X_frame, model):
+            numeric = X_frame.select_dtypes(include=['number', 'bool']).columns.tolist()
+            categorical = [c for c in X_frame.columns if c not in numeric]
+            transformers = []
+            if numeric:
+                transformers.append(('numeric', Pipeline([('imputer', SimpleImputer(strategy='median')), ('scaler', StandardScaler())]), numeric))
+            if categorical:
+                transformers.append(('categorical', Pipeline([('imputer', SimpleImputer(strategy='most_frequent')), ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))]), categorical))
+            return Pipeline([('preprocess', ColumnTransformer(transformers=transformers, remainder='drop')), ('model', model)])
 
-    results, errors = [], []
-    def train_one(name):
-        started = time.time()
-        pipe = pipeline(X_train, estimator(name))
-        pipe.fit(X_train, y_train)
-        value = score(y_val, pipe.predict(X_val))
-        joblib.dump(pipe, OUT / (name + '.joblib'))
-        return {'model': name, 'validation_metric': metric, 'validation_score': value,
-                'duration_seconds': round(time.time() - started, 2), 'artifact': str(OUT / (name + '.joblib'))}
+        def score(y_true, y_pred):
+            if problem_type == 'regression':
+                if metric == 'mae': return float(mean_absolute_error(y_true, y_pred))
+                if metric == 'r2': return float(r2_score(y_true, y_pred))
+                return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+            if metric == 'accuracy': return float(accuracy_score(y_true, y_pred))
+            return float(f1_score(y_true, y_pred, average='weighted', zero_division=0))
 
-    with ThreadPoolExecutor(max_workers=max(1, min(int(CFG['workers']), len(candidates)))) as pool:
-        futures = {pool.submit(train_one, name): name for name in candidates}
-        for future in as_completed(futures):
-            try: results.append(future.result())
-            except Exception as exc: errors.append({'model': futures[future], 'error': type(exc).__name__ + ': ' + str(exc)})
-    if not results: raise RuntimeError('All model experiments failed: ' + repr(errors))
-    best = results[0]
-    for result in results[1:]:
-        if better(result['validation_score'], best['validation_score']): best = result
-    X_trainval, y_trainval = pd.concat([X_train, X_val]), pd.concat([y_train, y_val])
-    best_pipe = pipeline(X_trainval, estimator(best['model']))
-    best_pipe.fit(X_trainval, y_trainval)
-    test_score = score(y_test, best_pipe.predict(X_test))
-    joblib.dump(best_pipe, OUT / 'best_model.joblib')
+        def better(a, b):
+            if problem_type == 'regression' and metric in ('rmse', 'mae'): return a < b
+            return a > b
 
-    metrics = {
-        'problem_type': problem_type, 'target_column': target, 'features': features,
-        'selection_metric': metric, 'best_model': best['model'],
-        'best_validation_score': best['validation_score'], 'held_out_test_score': test_score,
-        'test_metric': metric, 'experiments': sorted(results, key=lambda x: x['duration_seconds']),
-        'errors': errors, 'best_model_path': str(OUT / 'best_model.joblib'), 'rows_used': int(len(frame)),
-        'training_backend': 'google_colab'
-    }
-    (OUT / 'metrics.json').write_text(json.dumps(metrics, indent=2), encoding='utf-8')
-    script = '''# Reproducible training entry point generated by Auto ML Agent.\nfrom pathlib import Path\nimport pandas as pd\nfrom auto_ml_agent.engine.trainer import train_candidates\nCSV_PATH = Path("your_dataset.csv")\nTARGET = ''' + repr(target) + '''\nFEATURES = ''' + repr(features) + '''\nPROBLEM_TYPE = ''' + repr(problem_type) + '''\nMODEL = ''' + repr(best['model']) + '''\nMETRIC = ''' + repr(metric) + '''\nif __name__ == "__main__":\n    df = pd.read_csv(CSV_PATH)\n    print(train_candidates(df, TARGET, FEATURES, PROBLEM_TYPE, [MODEL], METRIC, Path("model_output"), workers=1))\n'''
-    (OUT / 'train_model.py').write_text(script, encoding='utf-8')
+        results, errors = [], []
+        def train_one(name):
+            started = time.time()
+            pipe = pipeline(X_train, estimator(name))
+            pipe.fit(X_train, y_train)
+            value = score(y_val, pipe.predict(X_val))
+            joblib.dump(pipe, OUT / (name + '.joblib'))
+            return {'model': name, 'validation_metric': metric, 'validation_score': value,
+                    'duration_seconds': round(time.time() - started, 2), 'artifact': str(OUT / (name + '.joblib'))}
+
+        with ThreadPoolExecutor(max_workers=max(1, min(int(CFG['workers']), len(candidates)))) as pool:
+            futures = {pool.submit(train_one, name): name for name in candidates}
+            for future in as_completed(futures):
+                try: results.append(future.result())
+                except Exception as exc: errors.append({'model': futures[future], 'error': type(exc).__name__ + ': ' + str(exc)})
+        if not results: raise RuntimeError('All model experiments failed: ' + repr(errors))
+        best = results[0]
+        for result in results[1:]:
+            if better(result['validation_score'], best['validation_score']): best = result
+        X_trainval, y_trainval = pd.concat([X_train, X_val]), pd.concat([y_train, y_val])
+        best_pipe = pipeline(X_trainval, estimator(best['model']))
+        best_pipe.fit(X_trainval, y_trainval)
+        test_score = score(y_test, best_pipe.predict(X_test))
+        joblib.dump(best_pipe, OUT / 'best_model.joblib')
+        metrics = {
+            'problem_type': problem_type, 'target_column': target, 'features': features,
+            'selection_metric': metric, 'best_model': best['model'],
+            'best_validation_score': best['validation_score'], 'held_out_test_score': test_score,
+            'test_metric': metric, 'experiments': sorted(results, key=lambda x: x['duration_seconds']),
+            'errors': errors, 'best_model_path': str(OUT / 'best_model.joblib'),
+            'rows_used': int(len(frame)), 'training_backend': 'google_colab',
+        }
+        (OUT / 'metrics.json').write_text(json.dumps(metrics, indent=2), encoding='utf-8')
+        script_lines = [
+            '# Reproducible training entry point generated by Auto ML Agent.',
+            'from pathlib import Path', 'import pandas as pd',
+            'from auto_ml_agent.engine.trainer import train_candidates',
+            'CSV_PATH = Path("your_dataset.csv")', 'TARGET = ' + repr(target),
+            'FEATURES = ' + repr(features), 'PROBLEM_TYPE = ' + repr(problem_type),
+            'MODEL = ' + repr(best['model']), 'METRIC = ' + repr(metric),
+            'if __name__ == "__main__":',
+            '    df = pd.read_csv(CSV_PATH)',
+            '    print(train_candidates(df, TARGET, FEATURES, PROBLEM_TYPE, [MODEL], METRIC, Path("model_output"), workers=1))',
+        ]
+        (OUT / 'train_model.py').write_text('\\n'.join(script_lines) + '\\n', encoding='utf-8')
+
     archive = OUT / 'colab_artifacts.zip'
     with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as zf:
         for path in OUT.iterdir():
@@ -336,7 +503,6 @@ try:
 except Exception:
     print('AUTOML_REMOTE_ERROR:' + traceback.format_exc())
 """.replace("__CONFIG_JSON__", repr(json.dumps(config)))
-
 
 def _execute_on_runtime(
     code: str,
@@ -537,7 +703,10 @@ def run_colab_job(frame: pd.DataFrame, *, target: str, features: list[str],
     """Train the configured allow-listed models on a connected Colab runtime."""
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         raise ValueError("Colab training requires a non-empty prepared pandas DataFrame.")
-    if problem_type not in {"classification", "regression"}:
+    if problem_type not in {
+        "classification", "regression", "clustering",
+        "anomaly_detection", "dimensionality_reduction",
+    }:
         raise ValueError(f"Unsupported problem type: {problem_type!r}")
     if not candidates:
         raise ValueError("At least one candidate model is required.")
