@@ -326,7 +326,7 @@
         <div class="run-top"><div><h2 class="run-title" id="runHeading">Experiment run</h2><div class="run-meta" id="runMeta">Connecting…</div></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-outline btn-sm" id="backToRuns">← All experiments</button><button class="btn btn-danger btn-sm hide" id="cancelRunBtn">Cancel run</button></div></div>
         <div class="card progress-card"><div class="progress-head"><div><div class="card-title" id="runStageTitle">Waiting for events</div><div class="card-sub" id="runMessage">The run will appear here as processing starts.</div></div><span class="badge queued" id="runStatusBadge">queued</span></div><div class="progress-track"><div class="progress-fill" id="runProgressBar" style="width:0%"></div></div><div class="progress-caption"><span id="runProgressText">0% complete</span><span id="runElapsed">Elapsed: —</span></div></div>
         <div class="grid result-grid" id="runStatCards"><div class="result-metric"><div class="result-label">Dataset rows</div><div class="result-value">—</div><div class="result-foot">Prepared dataset</div></div><div class="result-metric"><div class="result-label">Target</div><div class="result-value">—</div><div class="result-foot">Prediction column</div></div><div class="result-metric"><div class="result-label">Best model</div><div class="result-value">—</div><div class="result-foot">Selected after validation</div></div><div class="result-metric"><div class="result-label">Test score</div><div class="result-value">—</div><div class="result-foot">Held-out test data</div></div></div>
-        <div class="tabs" role="tablist"><button class="tab active" data-runtab="activity">Live activity</button><button class="tab" data-runtab="plans">Plans & approvals</button><button class="tab" data-runtab="quality">Data quality</button><button class="tab" data-runtab="results">Metrics</button><button class="tab" data-runtab="studio">Model Studio</button><button class="tab" data-runtab="artifacts">Artifacts</button></div>
+        <div class="tabs" role="tablist"><button class="tab active" data-runtab="activity">Live activity</button><button class="tab" data-runtab="plans">Plans & approvals</button><button class="tab" data-runtab="quality">Data quality</button><button class="tab" data-runtab="results">Metrics</button><button class="tab" data-runtab="studio">Model Studio</button><button class="tab" data-runtab="testing">Testing Studio</button><button class="tab" data-runtab="artifacts">Artifacts</button></div>
         <div class="run-tab-view active" id="runtab-activity"><div class="grid live-layout"><div class="card"><div class="card-head"><div><h3 class="card-title">Processing timeline</h3><div class="card-sub">Stage events reported by the backend</div></div><span class="badge running" id="liveIndicator">Live</span></div><div class="steps" id="runSteps"><div class="step active"><div class="step-circle">1</div><div class="step-label">Dataset</div></div><div class="step"><div class="step-circle">2</div><div class="step-label">Planning</div></div><div class="step"><div class="step-circle">3</div><div class="step-label">Quality</div></div><div class="step"><div class="step-circle">4</div><div class="step-label">Training</div></div><div class="step"><div class="step-circle">5</div><div class="step-label">Results</div></div></div><hr class="divider"/><div id="approvalSlot"></div><div class="card-head" style="margin-top:18px"><div><h3 class="card-title">Event stream</h3><div class="card-sub">Every status update, warning and error</div></div><div class="log-toolbar"><select id="logLevel"><option value="all">All levels</option><option value="info">Info</option><option value="warning">Warnings</option><option value="error">Errors</option></select><button class="btn btn-outline btn-sm" id="clearLogView">Clear view</button></div></div><div class="logs" id="logsBox"><div class="log-line"><span class="log-time">--:--:--</span><span class="log-level">INFO</span><span class="log-stage">connecting</span><span class="log-message">Waiting for server events…</span></div></div></div>
             <div><div class="card"><div class="card-head"><div><h3 class="card-title">Current configuration</h3><div class="card-sub">Inputs captured for this run</div></div></div><div id="runConfig"></div></div><div class="card" style="margin-top:15px"><div class="card-head"><div><h3 class="card-title">Live state</h3><div class="card-sub">Latest known job details</div></div></div><div id="liveDetails"></div></div></div>
           </div></div>
@@ -334,6 +334,30 @@
         <div class="run-tab-view hide" id="runtab-quality"><div class="grid two-col"><div class="card"><div class="card-head"><div><h3 class="card-title">Dataset quality summary</h3><div class="card-sub">Computed by the existing dataset engine</div></div></div><div id="qualitySummary"><div class="empty">The quality report will appear after the preparation stage.</div></div></div><div class="card"><div class="card-head"><div><h3 class="card-title">Feature analysis</h3><div class="card-sub">Heuristic flags only; columns are not automatically removed</div></div></div><div id="featureQuality"><div class="empty">No feature-analysis output yet.</div></div></div></div></div>
         <div class="run-tab-view hide" id="runtab-results"><div id="metricsOutput"><div class="empty"><div class="empty-icon">⌁</div><strong>Metrics are not ready</strong>The actual model comparison will appear here when training completes.</div></div></div>
         <div class="run-tab-view hide" id="runtab-studio"><div id="modelStudioOutput"><div class="empty"><div class="empty-icon">✦</div><strong>Model Studio is waiting</strong>Charts and model insights will be generated when training completes.</div></div></div>
+        <div class="run-tab-view hide" id="runtab-testing">
+          <div class="card">
+            <div class="card-head"><div><h3 class="card-title">Testing Studio</h3><div class="card-sub">Use one completed training run to compare predictions from every saved candidate model. No retraining.</div></div><button class="btn btn-outline btn-sm" id="refreshTestingSchema">Refresh models</button></div>
+            <div id="testingNotice" class="notice info"><span>ⓘ</span><span>Select a completed experiment, enter a sample or upload a CSV, then run every saved candidate model against the same input rows.</span></div>
+            <div id="testingUnavailable"></div>
+            <div id="testingWorkspace" class="hide">
+              <div class="grid two-col">
+                <div class="card" style="box-shadow:none">
+                  <div class="field"><label for="testingModelInfo">Training run and candidate models</label><div id="testingModelInfo" class="quality-list"></div></div>
+                  <div class="field"><label>Input method</label><div class="choice-row"><label class="choice"><input type="radio" name="testingInputMode" value="manual" checked/><span><span class="choice-title">Enter values</span><span class="choice-copy">One new record</span></span></label><label class="choice"><input type="radio" name="testingInputMode" value="csv"/><span><span class="choice-title">Upload CSV</span><span class="choice-copy">Batch prediction</span></span></label></div></div>
+                  <div id="testingManualInput"><div class="section-description">Fields below are inferred from the final approved training plan and saved training data.</div><div id="testingFields" class="grid" style="gap:10px"></div><div id="testingActualTargetField" class="field"></div></div>
+                  <div id="testingCsvInput" class="hide"><label for="testingCsvFile">CSV file</label><input class="input" id="testingCsvFile" type="file" accept=".csv,text/csv"/><div class="hint">Include every required input feature column. The true target column is optional and, if present, is used only for validation metrics.</div><div id="testingCsvFileName" class="hint"></div></div>
+                  <div class="form-actions"><button class="btn btn-primary" id="runTestingBtn">Run all models</button></div>
+                </div>
+                <div class="card" style="box-shadow:none">
+                  <h3 class="card-title">What will be tested?</h3><div class="card-sub">All candidate models saved in this experiment are called with identical input data.</div>
+                  <div id="testingFeatureSummary" class="quality-list" style="margin-top:12px"></div>
+                  <div class="notice info"><span>ⓘ</span><span>Input columns are determined from the completed run. Extra CSV columns are ignored for prediction, except the known target column which can be used to calculate optional human-validation metrics.</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="testingResults" style="margin-top:16px"></div>
+        </div>
         <div class="run-tab-view hide" id="runtab-artifacts"><div class="card"><div class="card-head"><div><h3 class="card-title">Run artifacts</h3><div class="card-sub">Download reports, metrics, scripts, logs, datasets, and trained models.</div></div><button class="btn btn-outline btn-sm" id="refreshArtifacts">Refresh</button></div><div class="artifacts-list" id="artifactList"><div class="empty">Artifacts will be listed after the run directory is created.</div></div></div></div>
       </section>
     </div>
@@ -836,6 +860,154 @@
     }
   }
 
+  // Testing Studio: infer fields from the selected run and call every saved candidate.
+  let testingSchema = null, testingResult = null;
+  function currentTestingMode() {
+    return document.querySelector('input[name="testingInputMode"]:checked')?.value || 'manual';
+  }
+  function renderTestingSchema(schema) {
+    testingSchema = schema;
+    $('testingWorkspace').classList.remove('hide');
+    $('testingUnavailable').innerHTML = '';
+    $('testingModelInfo').innerHTML = (schema.candidate_models || []).map(item =>
+      `<div class="quality-item"><div><strong>${escapeHtml(item.name)}</strong><p>${item.available ? 'Saved model artifact available' : 'Model artifact missing'}${item.validation_score == null ? '' : ` · ${escapeHtml(item.validation_metric || 'validation')}: ${escapeHtml(formatNumber(item.validation_score))}`}</p></div><span class="badge ${item.available ? 'succeeded' : 'failed'}">${item.available ? 'Ready' : 'Missing'}</span></div>`
+    ).join('') || '<div class="empty">No candidate models were recorded for this run.</div>';
+    $('testingFields').innerHTML = (schema.features || []).map((field, i) => {
+      const id = `testingField${i}`;
+      const value = field.sample_value == null ? '' : String(field.sample_value);
+      const hint = field.examples?.length ? `Examples: ${field.examples.slice(0,5).join(', ')}` : `Expected type: ${field.dtype}`;
+      const type = field.kind === 'number' ? 'number' : 'text';
+      return `<div class="field" style="margin:0"><label for="${id}">${escapeHtml(field.name)}${field.required ? ' *' : ''}</label><input class="input testing-value" id="${id}" data-feature-name="${escapeHtml(field.name)}" data-kind="${escapeHtml(field.kind)}" type="${type}" ${type === 'number' ? 'step="any"' : ''} value="${escapeHtml(value)}" placeholder="${escapeHtml(field.sample_value == null ? `Enter ${field.name}` : String(field.sample_value))}" required/><div class="hint">${escapeHtml(hint)}</div></div>`;
+    }).join('') || '<div class="empty">No input features could be inferred.</div>';
+    $('testingActualTargetField').innerHTML = schema.can_predict_target && schema.target_column
+      ? `<label for="testingActualTarget">Known actual ${escapeHtml(schema.target_column)} (optional)</label><input class="input" id="testingActualTarget" placeholder="Enter the true value to validate this one row"/> <div class="hint">If known, compare model predictions against this actual value.</div>`
+      : '';
+    $('testingFeatureSummary').innerHTML = [
+      `<div class="quality-item"><div><strong>Task type</strong><p>${escapeHtml(schema.problem_type.replaceAll('_',' '))}</p></div></div>`,
+      `<div class="quality-item"><div><strong>Input features</strong><p>${(schema.features || []).length} required column(s)</p></div></div>`,
+      `<div class="quality-item"><div><strong>Candidate models</strong><p>${(schema.candidate_models || []).filter(x=>x.available).length} saved artifact(s) available</p></div></div>`,
+      schema.note ? `<div class="notice warning"><span>!</span><span>${escapeHtml(schema.note)}</span></div>` : ''
+    ].join('');
+    $('testingNotice').innerHTML = `<span>ⓘ</span><span>Loaded schema for <strong>${escapeHtml(schema.run_id)}</strong>. Enter values or upload a CSV to compare all saved candidates.</span>`;
+    renderTestingMode();
+  }
+  function renderTestingMode() {
+    const csvMode = currentTestingMode() === 'csv';
+    $('testingManualInput').classList.toggle('hide', csvMode);
+    $('testingCsvInput').classList.toggle('hide', !csvMode);
+  }
+  async function loadTestingSchema() {
+    if (!currentRunId) return;
+    $('testingWorkspace').classList.add('hide');
+    $('testingUnavailable').innerHTML = '<div class="empty">Loading saved model schema…</div>';
+    $('testingResults').innerHTML = '';
+    try {
+      const schema = await api(`/api/experiments/${currentRunId}/testing-schema`);
+      renderTestingSchema(schema);
+    } catch (error) {
+      $('testingWorkspace').classList.add('hide');
+      $('testingUnavailable').innerHTML = `<div class="notice ${error.status === 409 ? 'info' : 'warning'}"><span>ⓘ</span><span>${escapeHtml(error.message || 'Could not load Testing Studio schema.')}</span></div>`;
+    }
+  }
+  function renderTestingResult(result) {
+    testingResult = result;
+    const modelNames = (result.predictions || []).map(item => item.model);
+    const rows = result.input_rows || [];
+    const columns = result.input_columns || [];
+    const predictionByModel = new Map((result.predictions || []).map(item => [item.model, item]));
+    let tableRows = '';
+    for (let i = 0; i < rows.length; i++) {
+      const featureCells = columns.map(name => `<td>${escapeHtml(rows[i][name] == null ? '' : String(rows[i][name]))}</td>`).join('');
+      const predictionCells = modelNames.map(name => {
+        const item = predictionByModel.get(name);
+        const value = item?.predictions?.[i];
+        const display = value && typeof value === 'object' ? Object.entries(value).map(([k,v])=>`${k}: ${v}`).join(' · ') : (value == null ? '—' : String(value));
+        const extra = item?.extra_columns || {};
+        const confidence = extra.confidence?.[i];
+        const anomalyScore = extra.anomaly_score?.[i];
+        return `<td><strong>${escapeHtml(display)}</strong>${confidence == null ? '' : `<div class="tiny">Confidence ${escapeHtml(formatNumber(confidence))}</div>`}${anomalyScore == null ? '' : `<div class="tiny">Anomaly score ${escapeHtml(formatNumber(anomalyScore))}</div>`}</td>`;
+      }).join('');
+      const actual = result.actual_values?.[i];
+      tableRows += `<tr>${featureCells}${predictionCells}${actual === undefined ? '' : `<td>${escapeHtml(actual == null ? '' : String(actual))}</td>`}</tr>`;
+    }
+    const actualHeader = result.actual_values ? '<th>Actual target</th>' : '';
+    const errorCards = (result.errors || []).map(item => `<div class="notice warning"><span>!</span><span><strong>${escapeHtml(item.model)}</strong>: ${escapeHtml(item.error)}</span></div>`).join('');
+    const metricCards = Object.entries(result.metrics || {}).map(([name, metrics]) => `<div class="result-metric"><div class="result-label">${escapeHtml(name)}</div><div class="result-value">${escapeHtml(Object.entries(metrics).filter(([key])=>key.startsWith('actual_')).map(([key,value])=>`${key.replace('actual_','').toUpperCase()}: ${formatNumber(value)}`).join(' · ') || 'Predictions generated')}</div><div class="result-foot">Human-validation metrics when actual values are supplied</div></div>`).join('');
+    $('testingResults').innerHTML = `<div class="card"><div class="card-head"><div><h3 class="card-title">Testing results</h3><div class="card-sub">${formatNumber(result.rows_tested)} row(s) · ${modelNames.length} model(s) returned predictions</div></div><button class="btn btn-outline btn-sm" id="downloadTestingResults">Download results CSV</button></div>${metricCards ? `<div class="grid result-grid">${metricCards}</div>` : ''}${errorCards}<div class="table-wrap"><table><thead><tr>${columns.map(name=>`<th>${escapeHtml(name)}</th>`).join('')}${modelNames.map(name=>`<th>${escapeHtml(name)} prediction</th>`).join('')}${actualHeader}</tr></thead><tbody>${tableRows || `<tr><td colspan="${columns.length+modelNames.length+(result.actual_values?1:0)}">No predictions returned.</td></tr>`}</tbody></table></div><div class="notice info" style="margin-top:12px"><span>ⓘ</span><span>Each prediction came from the saved candidate artifact. No model was retrained during this test.</span></div></div>`;
+    $('downloadTestingResults')?.addEventListener('click', downloadTestingResultsCsv);
+  }
+  function downloadTestingResultsCsv() {
+    if (!testingResult) return;
+    const result = testingResult;
+    const columns = result.input_columns || [];
+    const predictionMap = new Map((result.predictions || []).map(item => [item.model, item]));
+    const headers = [...columns, ...(result.predictions || []).map(item => `prediction_${item.model}`)];
+    if (result.actual_values) headers.push('actual_target');
+    const csvEscape = value => {
+      if (value && typeof value === 'object') value = JSON.stringify(value);
+      const str = value == null ? '' : String(value);
+      return /[",\r\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+    };
+    const rows = [headers.map(csvEscape).join(',')];
+    for (let i=0;i<(result.input_rows || []).length;i++) {
+      const row = result.input_rows[i];
+      rows.push([
+        ...columns.map(name=>row[name]),
+        ...(result.predictions || []).map(item=>item.predictions?.[i]),
+        ...(result.actual_values ? [result.actual_values[i]] : [])
+      ].map(csvEscape).join(','));
+    }
+    const blob = new Blob([rows.join('\r\n')], {type:'text/csv;charset=utf-8;'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href=url; a.download=`${result.run_id}_testing_predictions.csv`;
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  }
+  async function runTesting() {
+    if (!currentRunId || !testingSchema) return;
+    const button = $('runTestingBtn');
+    button.disabled = true; button.textContent = 'Testing models…';
+    $('testingResults').innerHTML = '<div class="empty">Running each saved model against your input…</div>';
+    try {
+      let result;
+      if (currentTestingMode() === 'csv') {
+        const file = $('testingCsvFile').files?.[0];
+        if (!file) throw new Error('Choose a CSV file first.');
+        const form = new FormData(); form.append('file', file);
+        result = await api(`/api/experiments/${currentRunId}/test-models/csv`, {method:'POST', body:form});
+      } else {
+        const rows = {};
+        for (const input of document.querySelectorAll('.testing-value')) {
+          const name = input.dataset.featureName;
+          const raw = input.value.trim();
+          if (!raw) throw new Error(`Enter a value for ${name}.`);
+          rows[name] = input.dataset.kind === 'number' ? Number(raw) : raw;
+          if (input.dataset.kind === 'number' && !Number.isFinite(rows[name])) throw new Error(`Enter a valid number for ${name}.`);
+        }
+        const body = {rows:[rows]};
+        const actual = $('testingActualTarget')?.value.trim();
+        if (actual) {
+          const field = testingSchema.features.find(x=>x.name === testingSchema.target_column);
+          body.actual_target = (field?.kind === 'number' || testingSchema.problem_type === 'regression') && Number.isFinite(Number(actual)) ? Number(actual) : actual;
+        }
+        result = await api(`/api/experiments/${currentRunId}/test-models`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+      }
+      renderTestingResult(result);
+      if (!(result.predictions || []).length) showToast(result.message || 'No models returned predictions.', true);
+      else showToast(`Testing complete: ${result.predictions.length} model(s) returned predictions.`);
+    } catch (error) {
+      $('testingResults').innerHTML = `<div class="notice warning"><span>!</span><span>${escapeHtml(error.message || 'Testing failed.')}</span></div>`;
+    } finally {
+      button.disabled = false; button.textContent = 'Run all models';
+    }
+  }
+  $('refreshTestingSchema')?.addEventListener('click', loadTestingSchema);
+  $('runTestingBtn')?.addEventListener('click', runTesting);
+  document.querySelectorAll('input[name="testingInputMode"]').forEach(input=>input.addEventListener('change', renderTestingMode));
+  $('testingCsvFile')?.addEventListener('change', () => {
+    const file = $('testingCsvFile').files?.[0];
+    $('testingCsvFileName').textContent = file ? `${file.name} · ${formatNumber(file.size / 1024)} KB` : '';
+  });
+
   async function loadArtifacts() {
     if (!currentRunId) return;
     try {
@@ -851,7 +1023,7 @@
   document.querySelectorAll('[data-runtab]').forEach(button => button.addEventListener('click', () => {
     document.querySelectorAll('[data-runtab]').forEach(el => el.classList.toggle('active', el === button));
     document.querySelectorAll('.run-tab-view').forEach(el => { const active = el.id === `runtab-${button.dataset.runtab}`; el.classList.toggle('active', active); el.classList.toggle('hide', !active); });
-    if (button.dataset.runtab === 'artifacts') loadArtifacts(); if (button.dataset.runtab === 'studio') loadModelStudio(); if (button.dataset.runtab === 'results') loadResults(); if (button.dataset.runtab === 'quality') renderQuality(); if (button.dataset.runtab === 'plans') renderPlans();
+    if (button.dataset.runtab === 'testing') loadTestingSchema(); if (button.dataset.runtab === 'artifacts') loadArtifacts(); if (button.dataset.runtab === 'studio') loadModelStudio(); if (button.dataset.runtab === 'results') loadResults(); if (button.dataset.runtab === 'quality') renderQuality(); if (button.dataset.runtab === 'plans') renderPlans();
   }));
 
   // Initialize defaults and health monitoring.

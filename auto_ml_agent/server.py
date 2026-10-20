@@ -11,6 +11,7 @@ calling the interactive CUI entry point. The CLI in main.py remains unchanged.
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
 import json
 import os
 import shutil
@@ -153,6 +154,16 @@ class ExperimentCreateRequest(BaseModel):
         if self.target_column and not self.target_column.strip():
             raise ValueError("target_column cannot be blank when provided.")
         return self
+
+
+class ModelTestingRequest(BaseModel):
+    """One or more new records to score against every saved candidate model."""
+
+    rows: list[dict[str, Any]] = Field(min_length=1, max_length=10000)
+    actual_target: Any | None = Field(
+        default=None,
+        description="Optional known target value for evaluating a single manually entered row.",
+    )
 
 
 class ApprovalRequest(BaseModel):
@@ -1670,6 +1681,312 @@ def download_artifact(run_id: str, artifact_path: str):
     if not candidate.is_file():
         raise HTTPException(status_code=404, detail="Artifact not found.")
     return FileResponse(candidate, filename=candidate.name)
+
+
+# ---------------------------------------------------------------------------
+# Testing Studio: score new records with every saved candidate model
+# ---------------------------------------------------------------------------
+
+def _testing_schema(job: ExperimentJob) -> dict[str, Any]:
+    """Infer the form schema from the exact final plan and prepared training snapshot."""
+    if job.status != "succeeded" or not isinstance(job.result, dict):
+        raise HTTPException(status_code=409, detail="Testing Studio is available after training completes successfully.")
+
+    result = job.result
+    problem_type = str(result.get("problem_type") or "classification")
+    features = list(result.get("features") or [])
+    target = result.get("target_column")
+    prepared_path = job.run_dir / "prepared_training_data.csv"
+    if not features and prepared_path.is_file():
+        features = [c for c in pd.read_csv(prepared_path, nrows=1).columns if c != target]
+    if not features:
+        raise HTTPException(status_code=409, detail="This run does not contain a saved input-feature schema.")
+
+    training_frame = pd.DataFrame()
+    if prepared_path.is_file():
+        try:
+            training_frame = pd.read_csv(prepared_path, nrows=500)
+        except Exception:
+            training_frame = pd.DataFrame()
+
+    fields: list[dict[str, Any]] = []
+    for name in features:
+        series = training_frame[name] if name in training_frame.columns else pd.Series(dtype="object")
+        non_null = series.dropna()
+        numeric = pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series)
+        unique_values = non_null.astype(str).drop_duplicates().head(20).tolist()
+        fields.append({
+            "name": str(name),
+            "dtype": str(series.dtype) if len(series) else "unknown",
+            "kind": "number" if numeric else "text",
+            "required": True,
+            "examples": unique_values,
+            "sample_value": _json_safe(non_null.iloc[0]) if len(non_null) else None,
+        })
+
+    candidates = []
+    for item in result.get("experiments") or []:
+        name = str(item.get("model") or "")
+        if not name:
+            continue
+        artifact_name = Path(str(item.get("artifact") or f"{name}.joblib")).name
+        artifact_path = (job.run_dir / "models" / artifact_name).resolve()
+        models_root = (job.run_dir / "models").resolve()
+        exists = artifact_path.is_file() and (artifact_path == models_root or models_root in artifact_path.parents)
+        candidates.append({
+            "name": name,
+            "artifact": artifact_name,
+            "available": exists,
+            "validation_score": item.get("validation_score"),
+            "validation_metric": item.get("validation_metric"),
+            "metrics": item.get("metrics"),
+        })
+
+    # Some older result formats do not carry per-candidate paths; the local artifact
+    # name is deterministic, so safely look for <candidate>.joblib.
+    for item in candidates:
+        candidate_path = (job.run_dir / "models" / item["artifact"]).resolve()
+        if not candidate_path.is_file():
+            fallback = (job.run_dir / "models" / f'{item["name"]}.joblib').resolve()
+            models_root = (job.run_dir / "models").resolve()
+            if fallback.is_file() and models_root in fallback.parents:
+                item["artifact"] = fallback.name
+                item["available"] = True
+
+    if not candidates and result.get("best_model"):
+        best_name = str(result["best_model"])
+        best_path = job.run_dir / "models" / f"{best_name}.joblib"
+        if not best_path.is_file():
+            best_path = job.run_dir / "models" / "best_model.joblib"
+        candidates.append({"name": best_name, "artifact": best_path.name, "available": best_path.is_file()})
+
+    is_advanced = problem_type in ADVANCED_PROBLEM_TYPES
+    task_note = None
+    if problem_type == "clustering":
+        task_note = "Clustering models that implement predict (such as K-Means) can assign new rows. DBSCAN and Agglomerative Clustering do not provide general-purpose prediction for unseen rows; those candidates will be reported as unsupported."
+    elif problem_type == "anomaly_detection":
+        task_note = "Isolation Forest and One-Class SVM can score new rows. Local Outlier Factor was trained in non-novelty mode and cannot score unseen rows with the saved estimator."
+    elif problem_type == "dimensionality_reduction":
+        task_note = "Saved PCA/SVD models transform new rows into component coordinates rather than predicting a target."
+    return {
+        "run_id": job.run_id,
+        "problem_type": problem_type,
+        "target_column": target,
+        "features": fields,
+        "candidate_models": candidates,
+        "can_predict_target": problem_type in {"classification", "regression"},
+        "advanced_task": is_advanced,
+        "note": task_note,
+    }
+
+
+def _run_testing_predictions(
+    job: ExperimentJob,
+    input_frame: pd.DataFrame,
+    actual_target: Any | None = None,
+) -> dict[str, Any]:
+    """Run each saved candidate artifact on the same new input rows without retraining."""
+    schema = _testing_schema(job)
+    problem_type = schema["problem_type"]
+    feature_names = [field["name"] for field in schema["features"]]
+    target_name = schema.get("target_column")
+    missing = [column for column in feature_names if column not in input_frame.columns]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "The input data is missing required feature columns.",
+                "missing_columns": missing,
+                "required_columns": feature_names,
+            },
+        )
+    if input_frame.empty:
+        raise HTTPException(status_code=422, detail="Provide at least one row to test.")
+
+    # Ignore extra columns for inference, but preserve a supplied true target for
+    # optional human-validation metrics. Never pass the target into supervised X.
+    X = input_frame.loc[:, feature_names].copy()
+    if len(X) > 10000:
+        raise HTTPException(status_code=413, detail="Testing is limited to 10,000 rows per request.")
+
+    output: dict[str, Any] = {
+        "run_id": job.run_id,
+        "problem_type": problem_type,
+        "rows_tested": int(len(X)),
+        "input_columns": feature_names,
+        "predictions": [],
+        "errors": [],
+        "actual_target_column": target_name if target_name in input_frame.columns else None,
+        "metrics": {},
+    }
+    output_rows = X.copy().reset_index(drop=True)
+    actual_values = None
+    if target_name and target_name in input_frame.columns:
+        actual_values = input_frame[target_name].reset_index(drop=True)
+    elif actual_target is not None and len(X) == 1:
+        actual_values = pd.Series([actual_target])
+
+    try:
+        import joblib
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Model loading dependency is unavailable: {exc}") from exc
+
+    for candidate in schema["candidate_models"]:
+        model_name = candidate["name"]
+        artifact_name = candidate["artifact"]
+        if not candidate.get("available"):
+            output["errors"].append({"model": model_name, "error": "Saved candidate model artifact was not found for this run."})
+            continue
+        model_path = (job.run_dir / "models" / artifact_name).resolve()
+        models_root = (job.run_dir / "models").resolve()
+        if models_root not in model_path.parents or not model_path.is_file():
+            output["errors"].append({"model": model_name, "error": "Saved model path is invalid or unavailable."})
+            continue
+
+        try:
+            saved = joblib.load(model_path)
+            prediction_values: list[Any]
+            model_metrics: dict[str, Any] = {}
+            model_output_columns: dict[str, list[Any]] = {}
+
+            if isinstance(saved, dict) and "task_type" in saved and "model" in saved:
+                # Advanced model bundle created by the advanced trainer.
+                bundle_task = saved.get("task_type")
+                input_columns = list(saved.get("input_columns") or feature_names)
+                missing_bundle = [c for c in input_columns if c not in input_frame.columns]
+                if missing_bundle:
+                    raise ValueError(f"Input data is missing model-required columns: {missing_bundle}")
+                bundle_X = input_frame.loc[:, input_columns].copy()
+                preprocessor = saved.get("preprocessor")
+                estimator = saved["model"]
+                ready = preprocessor.transform(bundle_X) if preprocessor is not None else bundle_X
+                if hasattr(ready, "toarray"):
+                    ready = ready.toarray()
+                if bundle_task == "clustering":
+                    if not hasattr(estimator, "predict"):
+                        raise ValueError(f"{model_name} does not support assigning unseen rows; this clustering estimator has no predict() method.")
+                    labels = estimator.predict(ready)
+                    prediction_values = [int(v) for v in np.asarray(labels).tolist()]
+                    model_metrics["output_type"] = "cluster_label"
+                elif bundle_task == "anomaly_detection":
+                    if model_name == "local_outlier_factor" or not hasattr(estimator, "predict"):
+                        raise ValueError("Local Outlier Factor was trained without novelty detection and cannot score new rows. Retraining with novelty=True would be required.")
+                    labels = np.asarray(estimator.predict(ready))
+                    prediction_values = ["anomaly" if int(v) == -1 else "normal" for v in labels.tolist()]
+                    if hasattr(estimator, "decision_function"):
+                        scores = -np.asarray(estimator.decision_function(ready), dtype=float)
+                    elif hasattr(estimator, "score_samples"):
+                        scores = -np.asarray(estimator.score_samples(ready), dtype=float)
+                    else:
+                        scores = np.full(len(X), np.nan)
+                    model_output_columns["anomaly_score"] = [_json_safe(float(v)) for v in scores]
+                    model_metrics["output_type"] = "anomaly_label"
+                elif bundle_task == "dimensionality_reduction":
+                    if not hasattr(estimator, "transform"):
+                        raise ValueError(f"{model_name} does not support transforming unseen rows.")
+                    reduced = np.asarray(estimator.transform(ready), dtype=float)
+                    prediction_values = [
+                        {f"component_{idx + 1}": _json_safe(value) for idx, value in enumerate(row)}
+                        for row in reduced
+                    ]
+                    model_metrics["output_type"] = "reduced_components"
+                else:
+                    raise ValueError(f"Unsupported saved model task type: {bundle_task!r}")
+            else:
+                # Existing classification/regression candidate artifacts are fitted
+                # sklearn Pipelines, including their fitted preprocessing steps.
+                estimator = saved
+                prediction = estimator.predict(X)
+                prediction_values = [_json_safe(value) for value in np.asarray(prediction).tolist()]
+                model_metrics["output_type"] = "class" if problem_type == "classification" else "numeric_prediction"
+                if problem_type == "classification" and hasattr(estimator, "predict_proba"):
+                    try:
+                        probabilities = np.asarray(estimator.predict_proba(X), dtype=float)
+                        model_output_columns["confidence"] = [
+                            _json_safe(float(np.max(row))) for row in probabilities
+                        ]
+                        classes = list(getattr(estimator, "classes_", []))
+                        if classes:
+                            model_output_columns["class_probabilities"] = [
+                                {str(classes[idx]): _json_safe(float(value)) for idx, value in enumerate(row)}
+                                for row in probabilities
+                            ]
+                    except Exception:
+                        pass
+
+            output["predictions"].append({
+                "model": model_name,
+                "predictions": prediction_values,
+                "extra_columns": model_output_columns,
+                "model_info": model_metrics,
+            })
+
+            # Optional human validation: only compute metrics when true labels are
+            # explicitly supplied, and only for supervised tasks.
+            if actual_values is not None and problem_type in {"classification", "regression"}:
+                if len(actual_values) != len(prediction_values):
+                    raise ValueError("Actual target length does not match predictions.")
+                if problem_type == "classification":
+                    from sklearn.metrics import accuracy_score, f1_score
+                    actual = actual_values.astype(str)
+                    predicted = pd.Series(prediction_values).astype(str)
+                    model_metrics["actual_accuracy"] = float(accuracy_score(actual, predicted))
+                    model_metrics["actual_f1_weighted"] = float(f1_score(actual, predicted, average="weighted", zero_division=0))
+                else:
+                    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+                    actual = pd.to_numeric(actual_values, errors="coerce").to_numpy(dtype=float)
+                    predicted = pd.to_numeric(pd.Series(prediction_values), errors="coerce").to_numpy(dtype=float)
+                    valid = np.isfinite(actual) & np.isfinite(predicted)
+                    if valid.any():
+                        model_metrics["actual_mae"] = float(mean_absolute_error(actual[valid], predicted[valid]))
+                        model_metrics["actual_rmse"] = float(np.sqrt(mean_squared_error(actual[valid], predicted[valid])))
+                        if valid.sum() >= 2:
+                            model_metrics["actual_r2"] = float(r2_score(actual[valid], predicted[valid]))
+                output["metrics"][model_name] = _json_safe(model_metrics)
+
+        except Exception as exc:
+            output["errors"].append({"model": model_name, "error": f"{type(exc).__name__}: {exc}"})
+
+    if not output["predictions"] and output["errors"]:
+        output["message"] = "No candidate model could score these rows. See per-model errors below."
+    output["input_rows"] = output_rows.to_dict(orient="records")
+    output["actual_values"] = [_json_safe(v) for v in actual_values.tolist()] if actual_values is not None else None
+    return _json_safe(output)
+
+
+@app.get("/api/experiments/{run_id}/testing-schema", tags=["Testing Studio"])
+def get_testing_schema(run_id: str) -> dict[str, Any]:
+    """Return dynamically inferred input fields and the candidate models for a run."""
+    job = _get_job_or_404(run_id)
+    return _testing_schema(job)
+
+
+@app.post("/api/experiments/{run_id}/test-models", tags=["Testing Studio"])
+def test_models_json(run_id: str, request: ModelTestingRequest) -> dict[str, Any]:
+    """Test one or more manually entered records with every candidate model."""
+    job = _get_job_or_404(run_id)
+    return _run_testing_predictions(job, pd.DataFrame(request.rows), request.actual_target)
+
+
+@app.post("/api/experiments/{run_id}/test-models/csv", tags=["Testing Studio"])
+async def test_models_csv(run_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
+    """Test a CSV upload with every candidate model; target column is optional."""
+    job = _get_job_or_404(run_id)
+    filename = (file.filename or "").lower()
+    if not filename.endswith(".csv"):
+        raise HTTPException(status_code=415, detail="Upload a .csv file.")
+    raw = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"CSV exceeds the {MAX_UPLOAD_MB} MB upload limit.")
+    try:
+        frame = pd.read_csv(BytesIO(raw))
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Could not read the uploaded CSV: {exc}") from exc
+    if frame.empty:
+        raise HTTPException(status_code=422, detail="The uploaded CSV contains no rows.")
+    if len(frame) > 10000:
+        raise HTTPException(status_code=413, detail="Testing is limited to 10,000 rows per request.")
+    return _run_testing_predictions(job, frame)
 
 
 # ---------------------------------------------------------------------------
