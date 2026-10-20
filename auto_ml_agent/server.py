@@ -156,6 +156,12 @@ class ExperimentCreateRequest(BaseModel):
         return self
 
 
+class SampleDatasetImportRequest(BaseModel):
+    """A curated public Hugging Face sample dataset to import for training."""
+
+    repo_id: Literal["haoxianc/venky73_spam-mails-dataset"]
+
+
 class ModelTestingRequest(BaseModel):
     """One or more new records to score against every saved candidate model."""
 
@@ -1421,6 +1427,104 @@ async def upload_and_inspect_dataset(file: UploadFile = File(...)) -> dict[str, 
         await file.close()
 
 
+
+# ---------------------------------------------------------------------------
+# API routes: curated sample datasets (training workflow only)
+# ---------------------------------------------------------------------------
+
+SAMPLE_DATASETS = {
+    "haoxianc/venky73_spam-mails-dataset": {
+        "name": "Spam Emails Dataset",
+        "description": "Sample email/spam classification dataset hosted on Hugging Face.",
+        "problem_type": "classification",
+        "provider": "Hugging Face",
+        "url": "https://huggingface.co/datasets/haoxianc/venky73_spam-mails-dataset",
+    }
+}
+
+
+@app.get("/api/sample-datasets", tags=["Datasets"])
+def list_sample_datasets() -> dict[str, Any]:
+    return {"datasets": [{"repo_id": repo_id, **metadata} for repo_id, metadata in SAMPLE_DATASETS.items()]}
+
+
+@app.post("/api/sample-datasets/import", tags=["Datasets"])
+def import_sample_dataset(request: SampleDatasetImportRequest) -> dict[str, Any]:
+    """Load a curated Hugging Face sample dataset and register it as a CSV for training."""
+    repo_id = request.repo_id
+    metadata = SAMPLE_DATASETS[repo_id]
+    dataset_id = uuid.uuid4().hex
+    final_path = UPLOADS_DIR / f"{dataset_id}.csv"
+    temporary_path = UPLOADS_DIR / f"{dataset_id}.uploading"
+    try:
+        try:
+            from datasets import load_dataset
+        except ImportError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Sample datasets require the 'datasets' package. Install it with: pip install datasets",
+            ) from exc
+
+        loaded = load_dataset(repo_id)
+        if hasattr(loaded, "keys") and not hasattr(loaded, "to_pandas"):
+            split_name = "train" if "train" in loaded else next(iter(loaded.keys()), None)
+            if split_name is None:
+                raise ValueError("The Hugging Face repository contains no dataset splits.")
+            split = loaded[split_name]
+        else:
+            split = loaded
+
+        frame = split.to_pandas()
+        if frame.empty or frame.shape[1] == 0:
+            raise ValueError("The selected sample dataset is empty.")
+        # This training application currently accepts scalar tabular CSV data only.
+        nested_columns = [
+            str(col) for col in frame.columns
+            if frame[col].dropna().map(lambda value: isinstance(value, (dict, list, tuple, set))).any()
+        ]
+        if nested_columns:
+            raise ValueError(f"This sample is not a scalar tabular dataset; unsupported columns: {nested_columns}")
+
+        frame.columns = [str(col) for col in frame.columns]
+        frame.to_csv(temporary_path, index=False)
+        temporary_path.replace(final_path)
+        target_candidates = ["label", "class", "target", "spam", "is_spam", "category"]
+        target_column = next((name for name in target_candidates if name in frame.columns), None)
+        original_name = f"{metadata['name'].lower().replace(' ', '_')}.csv"
+        summary = _dataset_summary(frame, dataset_id, original_name)
+        record = {
+            "dataset_id": dataset_id,
+            "path": str(final_path),
+            "original_filename": original_name,
+            "uploaded_at": utc_now(),
+            "bytes": final_path.stat().st_size,
+            "source": "huggingface_sample",
+            "repo_id": repo_id,
+            "source_url": metadata["url"],
+        }
+        with DATASETS_LOCK:
+            DATASETS[dataset_id] = record
+        summary["target_column"] = target_column
+        summary["source"] = {
+            "provider": metadata["provider"],
+            "repo_id": repo_id,
+            "url": metadata["url"],
+            "target_column": target_column,
+        }
+        return summary
+    except HTTPException:
+        temporary_path.unlink(missing_ok=True)
+        final_path.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        temporary_path.unlink(missing_ok=True)
+        final_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not load Hugging Face sample dataset {repo_id}: {type(exc).__name__}: {exc}",
+        ) from exc
+
+
 @app.get("/api/datasets/{dataset_id}", tags=["Datasets"])
 def get_dataset(dataset_id: str) -> dict[str, Any]:
     record = _resolve_dataset(dataset_id)
@@ -1443,6 +1547,7 @@ def delete_dataset(dataset_id: str) -> dict[str, Any]:
     with DATASETS_LOCK:
         DATASETS.pop(dataset_id, None)
     return {"deleted": True, "dataset_id": dataset_id}
+
 
 
 # ---------------------------------------------------------------------------

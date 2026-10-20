@@ -222,6 +222,21 @@
     .studio-hero p { color:#d9e5ff; font-size:11px; margin:0; }
     .studio-kicker { font-size:10px; letter-spacing:1.5px; text-transform:uppercase; opacity:.8; }
     @media(max-width:760px) { .studio-grid { grid-template-columns:1fr; } .studio-hero { align-items:flex-start; flex-direction:column; } }
+    .dataset-results { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin-top:14px; }
+    .dataset-result { border:1px solid var(--line); border-radius:13px; padding:14px; background:#fff; min-width:0; }
+    .dataset-result h3 { margin:0; font-size:13px; overflow-wrap:anywhere; }
+    .dataset-result p { color:var(--muted); font-size:11px; line-height:1.55; margin:7px 0 10px; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .dataset-meta { display:flex; flex-wrap:wrap; gap:6px; margin:9px 0 12px; }
+    .dataset-meta span { background:#f0f3f9; color:#5c6a83; border-radius:6px; padding:4px 6px; font-size:10px; }
+    .dataset-actions { display:flex; gap:6px; flex-wrap:wrap; }
+    .dataset-detail-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin:12px 0; }
+    .dataset-detail-metric { border:1px solid var(--line); border-radius:9px; padding:10px; }
+    .dataset-detail-metric strong { display:block; font-size:16px; margin-top:4px; overflow-wrap:anywhere; }
+    .dataset-table-wrap { overflow:auto; max-width:100%; }
+    .dataset-table-wrap table { width:100%; border-collapse:collapse; font-size:11px; }
+    .dataset-table-wrap th,.dataset-table-wrap td { border-bottom:1px solid var(--line); padding:8px; text-align:left; max-width:240px; overflow-wrap:anywhere; }
+    .dataset-table-wrap th { background:#f7f8fc; color:#59657a; position:sticky; top:0; }
+    @media(max-width:800px) { .dataset-results { grid-template-columns:1fr; } .dataset-detail-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
     .toast { position: fixed; right: 24px; bottom: 24px; z-index: 99; max-width: min(420px, calc(100vw - 32px)); background: #14203a; color: #fff; padding: 13px 16px; border-radius: 12px; box-shadow: 0 15px 35px #111a2d35; font-size: 12px; transform: translateY(15px); opacity: 0; pointer-events: none; transition: .2s; }
     .toast.show { transform: translateY(0); opacity: 1; }
     .muted { color: var(--muted); }
@@ -245,6 +260,7 @@
       <button class="nav-item active" data-view="dashboard"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="4" rx="1.5"/><rect x="14" y="10" width="7" height="11" rx="1.5"/><rect x="3" y="13" width="7" height="8" rx="1.5"/></svg>Dashboard</button>
       <button class="nav-item" data-view="new"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/><rect x="3" y="3" width="18" height="18" rx="4"/></svg>New experiment</button>
       <button class="nav-item" data-view="experiments"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10M7 12h7M7 16h4"/></svg>Experiments</button>
+      <button class="nav-item" data-view="datasets"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>Dataset Explorer</button>
     </nav>
     <div class="nav-label">Tools</div>
     <button class="nav-item" id="openDocs"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h8"/></svg>API documentation</button>
@@ -278,6 +294,17 @@
           </div>
           <div class="card"><div class="card-head"><div><h2 class="card-title">Recent experiments</h2><div class="card-sub">Open a run to see status, logs, approvals, and metrics</div></div><button class="link-btn" data-nav="experiments">View all</button></div><div class="job-list" id="recentJobs"><div class="empty"><div class="empty-icon">⌁</div><strong>No experiments yet</strong>Create your first experiment to see it here.</div></div></div>
         </div>
+      </section>
+
+      <section class="view" id="view-datasets">
+        <div class="run-top"><div><h2 class="run-title">Dataset Explorer</h2><div class="run-meta">Browse public OpenML datasets, inspect metadata and sample rows, download CSV files, or import a dataset directly into a new experiment.</div></div><span class="badge" style="background:#e8f8f0;color:#16845b">OpenML</span></div>
+        <div class="card">
+          <div class="row" style="align-items:flex-end;gap:12px"><div class="field" style="flex:1;margin:0"><label for="openmlSearchInput">Search datasets</label><input class="input" id="openmlSearchInput" maxlength="200" placeholder="Search dataset names, e.g. iris, adult, credit, housing"/><div class="hint">Search uses OpenML's public dataset metadata. Dataset files are only downloaded when you preview, download, or import one.</div></div><button class="btn btn-primary" id="openmlSearchBtn">Search OpenML</button><button class="btn btn-outline" id="openmlRefreshBtn">Refresh</button></div>
+          <div id="openmlSearchStatus" class="notice info" style="margin-top:14px"><span>ⓘ</span><span>Search OpenML to discover available public datasets.</span></div>
+          <div id="openmlResults" class="dataset-results"></div>
+          <div class="form-actions" style="justify-content:space-between"><span class="tiny" id="openmlPageInfo">No results loaded</span><div class="dataset-actions"><button class="btn btn-outline btn-sm" id="openmlPrevBtn" disabled>← Previous</button><button class="btn btn-outline btn-sm" id="openmlNextBtn" disabled>Next →</button></div></div>
+        </div>
+        <div class="card" style="margin-top:16px" id="openmlDetailsCard"><div class="card-head"><div><h3 class="card-title">Dataset details</h3><div class="card-sub">Select a dataset to inspect its description and data preview.</div></div></div><div id="openmlDetails"><div class="empty">No dataset selected yet.</div></div></div>
       </section>
 
       <section class="view" id="view-new">
@@ -394,7 +421,7 @@
     dimensionality_reduction: [['auto','Agent recommends'],['explained_variance','Explained variance']]
   };
   const advancedTasks = new Set(['clustering','anomaly_detection','dimensionality_reduction']);
-  const navTitles = { dashboard: ['Overview','Experiment overview'], new: ['New experiment','Create an experiment'], experiments: ['Experiments','Experiments'], run: ['Run details','Experiment run'] };
+  const navTitles = { dashboard: ['Overview','Experiment overview'], new: ['New experiment','Create an experiment'], experiments: ['Experiments','Experiments'], datasets: ['Tools','Dataset Explorer'], run: ['Run details','Experiment run'] };
 
   async function api(path, options = {}) {
     const response = await fetch(apiBase + path, options);
@@ -427,6 +454,7 @@
     $('crumbText').textContent = crumb; $('pageTitle').textContent = title;
     if (name === 'dashboard') refreshOverview();
     if (name === 'experiments') refreshRuns();
+    if (name === 'datasets') loadOpenMLResults();
   }
   document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => switchView(button.dataset.view)));
   document.querySelectorAll('[data-nav]').forEach(button => button.addEventListener('click', () => switchView(button.dataset.nav)));
@@ -437,6 +465,99 @@
   $('refreshArtifacts').addEventListener('click', loadArtifacts);
   $('clearLogView').addEventListener('click', () => { $('logsBox').innerHTML = ''; });
   $('logLevel').addEventListener('change', renderLogs);
+
+  // OpenML Dataset Explorer. Metadata search is separate from model training.
+  let openmlOffset = 0, openmlQuery = '', openmlResults = [], openmlSelectedId = null;
+  const openmlPageSize = 20;
+  function openmlStatus(message, kind = 'info') {
+    const icon = kind === 'warning' ? '!' : kind === 'success' ? '✓' : 'ⓘ';
+    $('openmlSearchStatus').className = `notice ${kind}`;
+    $('openmlSearchStatus').innerHTML = `<span>${icon}</span><span>${escapeHtml(message)}</span>`;
+  }
+  async function loadOpenMLResults(reset = false) {
+    if (reset) openmlOffset = 0;
+    const input = $('openmlSearchInput');
+    if (input && reset) openmlQuery = input.value.trim();
+    $('openmlSearchBtn').disabled = true;
+    $('openmlRefreshBtn').disabled = true;
+    $('openmlResults').innerHTML = '<div class="empty">Loading OpenML dataset metadata…</div>';
+    openmlStatus('Searching OpenML metadata. Dataset files are not downloaded during search.');
+    try {
+      const data = await api(`/api/openml/search?q=${encodeURIComponent(openmlQuery)}&limit=${openmlPageSize}&offset=${openmlOffset}`);
+      openmlResults = data.results || [];
+      $('openmlResults').innerHTML = openmlResults.length ? openmlResults.map(item => {
+        const description = (item.description || 'No short description supplied in search metadata. Open details to read the full OpenML description.');
+        const clipped = description.length > 220 ? `${description.slice(0,217)}…` : description;
+        return `<article class="dataset-result"><div class="card-head"><div><h3>${escapeHtml(item.name)}</h3><div class="tiny">OpenML dataset ID ${formatNumber(item.openml_id)}${item.version ? ` · version ${escapeHtml(item.version)}` : ''}</div></div><a class="link-btn" href="${escapeHtml(item.url)}" target="_blank" rel="noopener">OpenML ↗</a></div><p>${escapeHtml(clipped)}</p><div class="dataset-meta"><span>${formatNumber(item.rows)} rows</span><span>${formatNumber(item.features)} features</span><span>${item.classes == null ? 'Task not specified' : `${formatNumber(item.classes)} classes`}</span></div><div class="dataset-actions"><button class="btn btn-outline btn-sm" data-openml-details="${item.openml_id}">Details & preview</button><a class="btn btn-outline btn-sm" href="/api/openml/datasets/${item.openml_id}/download">Download CSV</a><button class="btn btn-primary btn-sm" data-openml-import="${item.openml_id}">Use for training</button></div></article>`;
+      }).join('') : '<div class="empty">No datasets returned. Try a broader name or clear the search.</div>';
+      $('openmlPageInfo').textContent = `${openmlResults.length} result(s) · offset ${openmlOffset}`;
+      $('openmlPrevBtn').disabled = openmlOffset <= 0;
+      $('openmlNextBtn').disabled = openmlResults.length < openmlPageSize;
+      openmlStatus(`Loaded ${openmlResults.length} OpenML result(s). Search is based on public metadata; preview/import downloads the selected dataset.`, 'success');
+      $('openmlResults').querySelectorAll('[data-openml-details]').forEach(button => button.addEventListener('click', () => showOpenMLDetails(Number(button.dataset.openmlDetails))));
+      $('openmlResults').querySelectorAll('[data-openml-import]').forEach(button => button.addEventListener('click', () => importOpenMLDataset(Number(button.dataset.openmlImport), button)));
+    } catch (error) {
+      $('openmlResults').innerHTML = `<div class="notice warning"><span>!</span><span>${escapeHtml(error.message || 'OpenML search failed. Check your internet connection and install the openml package.')}</span></div>`;
+      $('openmlPageInfo').textContent = 'Search failed';
+      openmlStatus(error.message || 'OpenML search failed.', 'warning');
+    } finally {
+      $('openmlSearchBtn').disabled = false;
+      $('openmlRefreshBtn').disabled = false;
+    }
+  }
+  async function showOpenMLDetails(openmlId) {
+    openmlSelectedId = openmlId;
+    $('openmlDetails').innerHTML = '<div class="empty">Loading dataset metadata…</div>';
+    try {
+      const detail = await api(`/api/openml/datasets/${openmlId}`);
+      const listed = openmlResults.find(item => Number(item.openml_id) === openmlId) || {};
+      const meta = {...listed, ...detail, rows: detail.rows ?? listed.rows, features: detail.features ?? listed.features, classes: detail.classes ?? listed.classes};
+      $('openmlDetails').innerHTML = `<h3 class="card-title">${escapeHtml(meta.name || `OpenML dataset ${openmlId}`)}</h3><div class="card-sub">ID ${openmlId}${meta.version ? ` · version ${escapeHtml(meta.version)}` : ''} · <a href="${escapeHtml(meta.url || `https://www.openml.org/d/${openmlId}`)}" target="_blank" rel="noopener">Open on OpenML ↗</a></div><div class="dataset-detail-grid"><div class="dataset-detail-metric"><span class="tiny">Rows</span><strong>${formatNumber(meta.rows)}</strong></div><div class="dataset-detail-metric"><span class="tiny">Features</span><strong>${formatNumber(meta.features)}</strong></div><div class="dataset-detail-metric"><span class="tiny">Target column</span><strong>${escapeHtml(meta.target_column || 'Not specified')}</strong></div><div class="dataset-detail-metric"><span class="tiny">Classes</span><strong>${formatNumber(meta.classes)}</strong></div><div class="dataset-detail-metric"><span class="tiny">License</span><strong>${escapeHtml(meta.license || 'Check source')}</strong></div><div class="dataset-detail-metric"><span class="tiny">Creator</span><strong>${escapeHtml(meta.creator || 'Not specified')}</strong></div></div><div class="section-description" style="white-space:pre-wrap;overflow-wrap:anywhere">${escapeHtml(meta.description || 'No description supplied by OpenML.')}</div><div class="dataset-actions" style="margin-top:14px"><button class="btn btn-outline btn-sm" id="openmlPreviewBtn">Load data preview</button><a class="btn btn-outline btn-sm" href="/api/openml/datasets/${openmlId}/download">Download CSV</a><button class="btn btn-primary btn-sm" id="openmlUseDetailBtn">Use for training</button></div><div id="openmlPreviewArea" style="margin-top:14px"></div>`;
+      $('openmlPreviewBtn').addEventListener('click', () => loadOpenMLPreview(openmlId));
+      $('openmlUseDetailBtn').addEventListener('click', () => importOpenMLDataset(openmlId, $('openmlUseDetailBtn')));
+    } catch (error) {
+      $('openmlDetails').innerHTML = `<div class="notice warning"><span>!</span><span>${escapeHtml(error.message || 'Could not load dataset details.')}</span></div>`;
+    }
+  }
+  async function loadOpenMLPreview(openmlId) {
+    $('openmlPreviewArea').innerHTML = '<div class="empty">Downloading dataset to prepare a small preview…</div>';
+    try {
+      const data = await api(`/api/openml/datasets/${openmlId}/preview?rows=10`);
+      const columns = (data.columns || []).slice(0, 10);
+      const rows = data.preview || [];
+      $('openmlPreviewArea').innerHTML = `<div class="dataset-detail-grid"><div class="dataset-detail-metric"><span class="tiny">Total rows</span><strong>${formatNumber(data.rows)}</strong></div><div class="dataset-detail-metric"><span class="tiny">Columns</span><strong>${formatNumber(data.columns_count)}</strong></div><div class="dataset-detail-metric"><span class="tiny">Missing cells</span><strong>${formatNumber(data.missing_cells)}</strong></div></div><div class="tiny" style="margin-bottom:8px">Previewing ${rows.length} rows and up to ${columns.length} columns. The backend downloads the dataset to produce this preview.</div><div class="dataset-table-wrap"><table><thead><tr>${columns.map(col => `<th>${escapeHtml(col.name)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${columns.map(col => `<td>${escapeHtml(row[col.name] ?? '—')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+    } catch (error) {
+      $('openmlPreviewArea').innerHTML = `<div class="notice warning"><span>!</span><span>${escapeHtml(error.message || 'Could not load data preview.')}</span></div>`;
+    }
+  }
+  async function importOpenMLDataset(openmlId, button) {
+    if (button) { button.disabled = true; button.dataset.originalText = button.textContent; button.textContent = 'Importing…'; }
+    try {
+      const dataset = await api(`/api/openml/datasets/${openmlId}/import`, {method:'POST'});
+      currentDataset = dataset;
+      document.querySelector('input[name="sourceType"][value="csv"]').checked = true;
+      updateSourceMode();
+      $('columnFields').classList.remove('hide');
+      $('fileInfo').innerHTML = `<div class="file-chip"><span>▤</span><span><strong>${escapeHtml(dataset.original_filename || `OpenML dataset ${openmlId}`)}</strong> · ${formatNumber(dataset.rows)} rows · ${formatNumber(dataset.columns_count)} columns · imported from OpenML</span><button type="button" id="removeDataset">Remove</button></div>`;
+      $('removeDataset').addEventListener('click', clearDataset);
+      populateColumnFields(dataset);
+      const targetName = dataset.source?.target_column || dataset.target_column;
+      if (targetName && dataset.columns.some(column => column.name === targetName)) $('targetColumn').value = targetName;
+      renderFeatures(); renderDatasetPreview(dataset); updateSummary();
+      switchView('new');
+      showToast(`Imported ${dataset.original_filename || 'OpenML dataset'} for training.`);
+    } catch (error) {
+      showToast(error.message || 'Could not import OpenML dataset.', true);
+      if (button) button.textContent = button.dataset.originalText || 'Use for training';
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+  $('openmlSearchBtn').addEventListener('click', () => loadOpenMLResults(true));
+  $('openmlRefreshBtn').addEventListener('click', () => loadOpenMLResults(false));
+  $('openmlSearchInput').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); loadOpenMLResults(true); } });
+  $('openmlPrevBtn').addEventListener('click', () => { openmlOffset = Math.max(0, openmlOffset - openmlPageSize); loadOpenMLResults(false); });
+  $('openmlNextBtn').addEventListener('click', () => { openmlOffset += openmlPageSize; loadOpenMLResults(false); });
 
   async function checkHealth() {
     try {
